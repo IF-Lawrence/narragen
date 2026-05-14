@@ -1,0 +1,2898 @@
+import { useEffect, useState, useRef } from 'react';
+import { Card, Typography, Form, Input, Button, Space, List, Grid, Tag, Modal, Tooltip, Popconfirm, Checkbox, InputNumber, Message, Collapse, Popover, InputTag, Avatar } from '@arco-design/web-react';
+import { IconEdit, IconDelete, IconCaretUp, IconCaretDown, IconPlus, IconDownload, IconUpload, IconSync, IconSettings } from '@arco-design/web-react/icon';
+import { useProject } from '../../contexts/ProjectContext';
+import { useBreakpoint } from '../../hooks/useBreakpoint';
+import { storageEx, storage } from '../../services/storage';
+import { PlannerAgent } from '../../services/agents/PlannerAgent';
+import { AgentCoordinator } from '../../services/AgentCoordinator';
+import { outlineTemplates } from '../../config/outlineTemplates';
+
+const { Title, Text, Paragraph } = Typography;
+const { Row, Col } = Grid;
+
+
+export const PlotArchitecture = () => {
+  const { currentProject } = useProject();
+  const screens = useBreakpoint();
+  const planner = new PlannerAgent();
+  const [formIdea] = Form.useForm();
+
+  const [coreOutline, setCoreOutline] = useState('');
+  const [outlineJSON, setOutlineJSON] = useState(null);
+  const [volumes, setVolumes] = useState([]);
+  const [selectedVolumeId, setSelectedVolumeId] = useState(null);
+  const [chapterNodes, setChapterNodes] = useState([]);
+
+  const [editingVolume, setEditingVolume] = useState(null);
+  const [editVolumeVisible, setEditVolumeVisible] = useState(false);
+  const [formVolumeEdit] = Form.useForm();
+  const [selectedVolumeIds, setSelectedVolumeIds] = useState(new Set());
+
+  const [chapterNodesMap, setChapterNodesMap] = useState({});
+  const [sceneRewriteMap, setSceneRewriteMap] = useState({});
+  const [chapterOptionsVisible, setChapterOptionsVisible] = useState(null);
+
+  // Local status states
+  const [coreStatus, setCoreStatus] = useState({ loading: false, msg: '' });
+  const [volumeStatus, setVolumeStatus] = useState({ loading: false, msg: '' });
+  const abortControllerRef = useRef(null);
+  const [volumePlanStatus, setVolumePlanStatus] = useState({}); // { [vid]: string }
+  const [sceneGenStatus, setSceneGenStatus] = useState({}); // { [chapterId]: string }
+  const [selectedChapterIdsByVolume, setSelectedChapterIdsByVolume] = useState({});
+  const [chapterBatchStatusByVolume, setChapterBatchStatusByVolume] = useState({});
+
+  const [editStructureVisible, setEditStructureVisible] = useState(false);
+  const [formStructure] = Form.useForm();
+
+  const [genVolumeVisible, setGenVolumeVisible] = useState(false);
+  const [formGenVolume] = Form.useForm();
+  const [genVolumeCount, setGenVolumeCount] = useState(1);
+  const [importOutlineVisible, setImportOutlineVisible] = useState(false);
+  const [importOutlineText, setImportOutlineText] = useState('');
+  const [messageApi, messageHolder] = Message.useMessage();
+  const [editingSummaryId, setEditingSummaryId] = useState(null);
+  const [editingDetailedSummaryId, setEditingDetailedSummaryId] = useState(null);
+  const [editingSceneId, setEditingSceneId] = useState(null);
+
+  // Advanced outline options
+  const [advancedOptionsVisible, setAdvancedOptionsVisible] = useState(false);
+  const [outlineOptions, setOutlineOptions] = useState({
+    novelType: '',
+    targetAudience: [],
+    tone: '',
+    length: 'medium',
+    characterCount: 4,
+    cpSetting: '1v1'
+  });
+
+  // Character presets for outline generation
+  const [characterPresets, setCharacterPresets] = useState([]);
+
+  // Outline module editing
+  const [editingModule, setEditingModule] = useState(null);
+  const [moduleEditData, setModuleEditData] = useState({});
+  const [genChaptersVisible, setGenChaptersVisible] = useState(false);
+  const [genChaptersVolumeId, setGenChaptersVolumeId] = useState(null);
+  const [formGenChapters] = Form.useForm();
+
+  const [regenVolumeVisible, setRegenVolumeVisible] = useState(false);
+  const [regenVolumeGuidance, setRegenVolumeGuidance] = useState('');
+  const [regenTargetVolume, setRegenTargetVolume] = useState(null);
+
+
+  // AI Template Generation
+  const [genTemplateVisible, setGenTemplateVisible] = useState(false);
+  const [genTemplateIdea, setGenTemplateIdea] = useState('');
+  const [genTemplateLoading, setGenTemplateLoading] = useState(false);
+
+  const handleGenerateTemplate = async () => {
+    if (!genTemplateIdea.trim()) {
+      messageApi.warning('请输入您的想法');
+      return;
+    }
+    setGenTemplateLoading(true);
+    try {
+      const template = await planner.generateTemplate(genTemplateIdea);
+
+      formIdea.setFieldsValue({
+        mainPlot: template.storyFields?.mainPlot || '',
+        mainConflict: template.storyFields?.mainConflict || '',
+        storyBeginning: template.storyFields?.storyBeginning || '',
+        expectedEnding: template.storyFields?.expectedEnding || '',
+        timePeriod: template.worldFields?.timePeriod || '',
+        mainSettings: template.worldFields?.mainSettings || '',
+        worldFeatures: template.worldFields?.worldFeatures || '',
+        socialRules: template.worldFields?.socialRules || ''
+      });
+      setOutlineOptions(template.options || {
+        novelType: '现代都市',
+        targetAudience: [],
+        tone: '',
+        length: 'medium',
+        characterCount: 4,
+        cpSetting: '1v1'
+      });
+      setCharacterPresets(template.characters || []);
+
+      messageApi.success(`已生成并在应用模板: ${template.name}`);
+      setGenTemplateVisible(false);
+      setGenTemplateIdea('');
+    } catch (error) {
+      console.error('Failed to generate template:', error);
+      messageApi.error('模板生成失败，请重试');
+    } finally {
+      setGenTemplateLoading(false);
+    }
+  };
+
+
+  // Passion level controls
+  // Passion level controls
+  const [previewChapters, setPreviewChapters] = useState([]);
+  const [chapterPassionLevels, setChapterPassionLevels] = useState({});
+  const [passionSystemName, setPassionSystemName] = useState('章节波动等级 (Passion Level)');
+
+  // Characters data for avatar display
+  const [characters, setCharacters] = useState([]);
+
+  // Interrupt recovery states
+  const [generationProgress, setGenerationProgress] = useState(null);
+  const [showResumeModal, setShowResumeModal] = useState(false);
+
+  // 获取波动等级定义
+  const getPassionDefinitions = async () => {
+    if (!currentProject) return null;
+    const definitions = await storage.getItem(`passion_definitions_${currentProject.id}`);
+    if (definitions) {
+      return definitions;
+    }
+    // 默认定义
+    return {
+      systemName: "章节波动等级 (Passion Level)",
+      1: "清水/铺垫：注重情感交流，氛围渲染，无直接描写。",
+      2: "升温/暧昧：肢体接触增加，情感张力增强，有明显的暗示。",
+      3: "激烈/直白：高强度的情感爆发，大胆的动作描写。",
+      4: "极限/狂热：极致的张力与激情，突破常规的描写尺度。",
+      5: "禁忌/极致：完全释放的情感表达，无保留的描写尺度。"
+    };
+  };
+
+  // Progress management functions for interrupt recovery
+  const saveProgress = (volumeId, progress) => {
+    if (!currentProject) return;
+    localStorage.setItem(`chapter_gen_progress_${currentProject.id}_${volumeId}`, JSON.stringify(progress));
+  };
+
+  const loadProgress = (volumeId) => {
+    if (!currentProject) return null;
+    const saved = localStorage.getItem(`chapter_gen_progress_${currentProject.id}_${volumeId}`);
+    return saved ? JSON.parse(saved) : null;
+  };
+
+  const clearProgress = (volumeId) => {
+    if (!currentProject) return;
+    localStorage.removeItem(`chapter_gen_progress_${currentProject.id}_${volumeId}`);
+  };
+
+  // Scene generation with retry logic for empty scenes
+  const generateScenesWithRetry = async (context, maxRetries = 3) => {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const text = await planner.generateChapterScenes(context);
+        let clean = typeof text === 'string' ? text : JSON.stringify(text);
+        if (clean.includes('```')) clean = clean.replace(/```json\n?|```\n?|```/g, '');
+
+        let scenesObj = { scenes: [] };
+        try {
+          scenesObj = JSON.parse(clean);
+          if (!Array.isArray(scenesObj.scenes)) scenesObj.scenes = [];
+        } catch {
+          scenesObj = { scenes: [] };
+        }
+
+        // Validate scenes are not empty
+        if (scenesObj.scenes && scenesObj.scenes.length > 0) {
+          return scenesObj;
+        }
+
+        // If empty and still have retries, wait and retry
+        if (attempt < maxRetries) {
+          console.warn(`场景生成为空，重试 ${attempt}/${maxRetries}`);
+          setVolumePlanStatus(prev => ({ ...prev, [context.volumeId]: `场景为空，重试中 (${attempt}/${maxRetries})...` }));
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      } catch (error) {
+        console.error(`场景生成失败 (尝试 ${attempt}/${maxRetries}):`, error);
+        if (attempt === maxRetries) throw error;
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+
+    // All retries failed
+    throw new Error('场景生成失败：生成的场景列表为空（已重试3次）');
+  };
+
+  const loadData = async () => {
+    if (!currentProject) return;
+
+    // Load passion definitions
+    const defs = await getPassionDefinitions();
+    if (defs && defs.systemName) {
+      setPassionSystemName(defs.systemName);
+    } else {
+      setPassionSystemName('章节波动等级 (Passion Level)');
+    }
+
+    const outlineRow = await storageEx.getCoreOutline(currentProject.id);
+    setCoreOutline(outlineRow ? outlineRow.content : '');
+    try {
+      let text = outlineRow ? outlineRow.content : '';
+      if (text && typeof text === 'string') {
+        if (text.includes('```json')) text = text.replace(/```json\n?|\n?```/g, '');
+        else if (text.includes('```')) text = text.replace(/```\n?|\n?```/g, '');
+        const parsed = JSON.parse(text);
+        setOutlineJSON(parsed);
+      } else {
+        setOutlineJSON(null);
+      }
+    } catch { setOutlineJSON(null); }
+    const vols = await storageEx.getVolumes(currentProject.id);
+    setVolumes(vols);
+    if (vols.length > 0) {
+      setSelectedVolumeId(vols[0].id);
+      const map = {};
+      for (const v of vols) {
+        const nodes = await storageEx.getChapterNodesByVolume(v.id);
+        map[v.id] = nodes.sort((a, b) => a.order - b.order);
+      }
+      setChapterNodesMap(map);
+      setChapterNodes(map[vols[0].id] || []);
+    } else {
+      setSelectedVolumeId(null);
+      setChapterNodes([]);
+    }
+
+    // Load characters for avatar display
+    const chars = await storage.getItemsByProject('characters', currentProject.id);
+    setCharacters(chars);
+  };
+
+
+
+  useEffect(() => { loadData(); }, [currentProject]);
+
+  // Check for interrupted generation tasks on load
+  useEffect(() => {
+    if (currentProject && volumes.length > 0) {
+      for (const v of volumes) {
+        const progress = loadProgress(v.id);
+        if (progress && progress.completedChapters < progress.totalChapters) {
+          setGenerationProgress(progress);
+          setShowResumeModal(true);
+          break;
+        }
+      }
+    }
+  }, [currentProject, volumes]);
+
+  const handleGenerateCoreOutline = async () => {
+    try {
+      setCoreStatus({ loading: true, msg: '正在生成...' });
+
+      // Create new abort controller
+      if (abortControllerRef.current) abortControllerRef.current.abort();
+      abortControllerRef.current = new AbortController();
+
+      const values = formIdea.getFieldsValue();
+
+      // Construct idea from detailed story fields
+      const idea = `${values.mainPlot || ''}${values.mainConflict ? '。主要冲突：' + values.mainConflict : ''}${values.storyBeginning ? '。故事开端：' + values.storyBeginning : ''}${values.expectedEnding ? '。预期结局：' + values.expectedEnding : ''}`;
+
+      // Construct world from detailed world fields
+      const world = `时代背景：${values.timePeriod || ''}。主要场景：${values.mainSettings || ''}${values.worldFeatures ? '。世界特色：' + values.worldFeatures : ''}${values.socialRules ? '。社会规则：' + values.socialRules : ''}`;
+
+
+      // Fetch custom constraints
+      const constraintsRows = await storageEx.getItems('constraints', { projectId: currentProject.id });
+      const constraints = constraintsRows.map(x => x.content).join('\n');
+
+      const result = await planner.generateCoreOutline({
+        idea,
+        world,
+        characters: characterPresets,
+        constraints: constraints, // Pass constraints
+        projectId: currentProject.id,
+        options: outlineOptions,
+        signal: abortControllerRef.current.signal
+      });
+      setCoreOutline(result);
+
+      // Helper function to clean common JSON errors
+      const cleanJSON = (text) => {
+        let cleaned = text
+          .replace(/"/g, '"')              // Replace Chinese left quotes with English quotes
+          .replace(/"/g, '"')              // Replace Chinese right quotes with English quotes
+          .replace(/'/g, "'")              // Replace Chinese left single quotes
+          .replace(/'/g, "'")              // Replace Chinese right single quotes
+          .replace(/,(\s*[}\]])/g, '$1')  // Remove trailing commas
+          .replace(/\/\/.*$/gm, '')       // Remove single-line comments
+          .replace(/\/\*[\s\S]*?\*\//g, '') // Remove multi-line comments
+          .trim();
+
+        // Attempt to fix unquoted values following a number (common in age fields like: age: 28 (soul age))
+        // This is a heuristic fix: if we see "key": number text, we try to quote the whole value
+        cleaned = cleaned.replace(/("age"\s*:\s*)([\d]+[\u4e00-\u9fa5\(\)（）\w\s]+)(?=[,}])/g, '$1"$2"');
+
+        return cleaned;
+      };
+
+      let parsedOutline = null;
+      try {
+        let text = result;
+        // Robustly extract JSON content
+        const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/```\s*([\s\S]*?)\s*```/);
+        if (jsonMatch) {
+          text = jsonMatch[1];
+          console.log('[Core Outline] Extracted from markdown block');
+        }
+
+        // Clean the JSON text
+        text = cleanJSON(text);
+
+        parsedOutline = JSON.parse(text);
+        setOutlineJSON(parsedOutline);
+        console.log('[Core Outline] Successfully parsed JSON');
+      } catch (e) {
+        console.error('[Core Outline] JSON parse failed:', e.message);
+        console.error('[Core Outline] Raw response:', result);
+
+        try {
+          // Fallback: try to find the first { and last }
+          const firstBrace = result.indexOf('{');
+          const lastBrace = result.lastIndexOf('}');
+          if (firstBrace !== -1 && lastBrace !== -1) {
+            const jsonStr = cleanJSON(result.substring(firstBrace, lastBrace + 1));
+            console.log('[Core Outline] Attempting to parse extracted JSON:', jsonStr.substring(0, 100) + '...');
+            parsedOutline = JSON.parse(jsonStr);
+            setOutlineJSON(parsedOutline);
+            console.log('[Core Outline] Successfully parsed with fallback method');
+          } else {
+            console.error('[Core Outline] No JSON braces found in response');
+            setOutlineJSON(null);
+          }
+        } catch (e2) {
+          console.error('[Core Outline] All parsing attempts failed:', e2.message);
+          console.error('[Core Outline] Attempted to parse:', result.substring(0, 200));
+          setOutlineJSON(null);
+        }
+      }
+
+      await storageEx.updateCoreOutline(currentProject.id, { title: '核心大纲', content: result });
+
+      // Auto-create character cards from outline
+      if (parsedOutline?.characters && Array.isArray(parsedOutline.characters)) {
+        let createdCount = 0;
+        for (const char of parsedOutline.characters) {
+          try {
+            await storage.addItem('characters', {
+              projectId: currentProject.id,
+              name: char.name || '未命名',
+              role: char.role || '角色',
+              age: char.age,
+              gender: char.gender,
+              traits: char.personality || '',
+              bio: char.background || '',
+              goal: char.goal || '',
+              arc: char.arc || '',
+              appearance: char.appearance || '',
+              // New dynamic fields
+              currentState: {
+                chapter: 0,
+                emotional: char.personality || '',
+                description: '初始状态'
+              },
+              stateHistory: [],
+              relationships: char.relationships || {},
+              chapterAppearances: [],
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            });
+            createdCount++;
+          } catch (err) {
+            console.error(`Failed to create character ${char.name}:`, err);
+          }
+        }
+        if (createdCount > 0) {
+          messageApi.success(`已生成核心大纲并自动创建 ${createdCount} 个角色卡`);
+        }
+      }
+
+      setCoreStatus({ loading: false, msg: '已生成并保存' });
+      abortControllerRef.current = null;
+    } catch (e) {
+      if (e.name === 'AbortError' || e.message === 'aborted') {
+        setCoreStatus({ loading: false, msg: '已停止生成' });
+        messageApi.info('已停止生成');
+      } else {
+        console.error(e);
+        setCoreStatus({ loading: false, msg: '生成失败' });
+        messageApi.error('生成失败');
+      }
+      abortControllerRef.current = null;
+    }
+  };
+
+  const handleSaveCoreOutline = async () => {
+    try {
+      setCoreStatus({ loading: true, msg: '保存中...' });
+      await storageEx.updateCoreOutline(currentProject.id, { title: '核心大纲', content: coreOutline });
+      try {
+        let text = coreOutline;
+        if (text.includes('```json')) text = text.replace(/```json\n?|\n?```/g, '');
+        else if (text.includes('```')) text = text.replace(/```\n?|\n?```/g, '');
+        const parsed = JSON.parse(text);
+        setOutlineJSON(parsed);
+      } catch { setOutlineJSON(null); }
+      setCoreStatus({ loading: false, msg: '已保存' });
+    } catch (e) {
+      setCoreStatus({ loading: false, msg: '保存失败' });
+    }
+  };
+
+  const handleOpenImportOutline = () => {
+    setImportOutlineText(coreOutline || '');
+    setImportOutlineVisible(true);
+  };
+
+  const handleConfirmImportOutline = async () => {
+    let parsedOutline = null; // Declare in outer scope
+    try {
+      const text = importOutlineText || '';
+      let jsonText = text;
+      if (jsonText.includes('```json')) jsonText = jsonText.replace(/```json\n?|\n?```/g, '');
+      else if (jsonText.includes('```')) jsonText = jsonText.replace(/```\n?|\n?```/g, '');
+      setCoreOutline(text);
+      try {
+        parsedOutline = JSON.parse(jsonText); // Assign to outer variable
+        setOutlineJSON(parsedOutline);
+      } catch {
+        setOutlineJSON(null);
+      }
+      await storageEx.updateCoreOutline(currentProject.id, { title: '核心大纲', content: text });
+
+      // Auto-create/update characters from imported outline
+      if (parsedOutline?.characters && Array.isArray(parsedOutline.characters)) {
+        let createdCount = 0;
+        // First, get existing characters to avoid duplicates if needed, or just upsert
+        // For simplicity and to match "import" semantics, we'll upsert based on name
+        const existingChars = await storage.getItemsByProject('characters', currentProject.id);
+
+        for (const char of parsedOutline.characters) {
+          try {
+            const existing = existingChars.find(c => c.name === char.name);
+            const charData = {
+              projectId: currentProject.id,
+              name: char.name || '未命名',
+              role: char.role || '角色',
+              age: char.age,
+              gender: char.gender,
+              traits: char.personality || '',
+              bio: char.background || '',
+              goal: char.goal || '',
+              arc: char.arc || '',
+              appearance: char.appearance || '',
+              // New dynamic fields
+              currentState: {
+                chapter: 0,
+                emotional: char.personality || '',
+                description: '初始状态'
+              },
+              stateHistory: [],
+              relationships: char.relationships || {},
+              chapterAppearances: [],
+              updatedAt: new Date().toISOString()
+            };
+
+            if (existing) {
+              await storage.updateItem('characters', { ...existing, ...charData });
+            } else {
+              await storage.addItem('characters', { ...charData, createdAt: new Date().toISOString() });
+            }
+            createdCount++;
+          } catch (err) {
+            console.error(`Failed to sync character ${char.name}:`, err);
+          }
+        }
+        if (createdCount > 0) {
+          messageApi.success(`大纲已导入并同步 ${createdCount} 个角色`);
+        } else {
+          messageApi.success('大纲已导入');
+        }
+      } else {
+        messageApi.success('大纲已导入');
+      }
+
+      setImportOutlineVisible(false);
+    } catch (err) {
+      console.error(err);
+      messageApi.error('导入失败');
+    }
+  };
+
+  const handleCancelImportOutline = () => {
+    setImportOutlineVisible(false);
+  };
+
+  const handleExportCoreOutline = () => {
+    let content = coreOutline;
+    if (!content) {
+      const defaultTemplate = {
+        title: "Novel Title",
+        logline: "",
+        theme: "",
+        coreConflict: "",
+        tone: "",
+        pacing: "",
+        targetAudience: "",
+        tags: [],
+        worldSetting: { description: "", rules: "" },
+        characters: [{
+          name: "", role: "主角", age: 20, gender: "男",
+          personality: "", background: "", goal: "", arc: "",
+          appearance: "", relationships: {}
+        }],
+        plotProgression: [],
+        ending: ""
+      };
+      content = JSON.stringify(defaultTemplate, null, 2);
+    }
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `core_outline_${currentProject?.name || 'project'}.txt`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleDeleteCoreOutline = async () => {
+    try {
+      await storageEx.deleteCoreOutline(currentProject.id);
+
+      // Delete all characters associated with the project
+      const chars = await storage.getItemsByProject('characters', currentProject.id);
+      for (const char of chars) {
+        await storage.deleteItem('characters', char.id);
+      }
+
+      setCoreOutline('');
+      setOutlineJSON(null);
+      messageApi.success('核心大纲及相关角色已删除');
+    } catch (e) {
+      console.error(e);
+      messageApi.error('删除失败');
+    }
+  };
+
+
+  const handleOpenGenerateVolumes = () => {
+    if (!outlineJSON && !coreOutline) {
+      messageApi.error('请先生成或者导入核心大纲');
+      return;
+    }
+    setGenVolumeVisible(true);
+    setGenVolumeCount(4);
+    formGenVolume.setFieldsValue({ count: 4 });
+  };
+
+  const handleGenerateVolumes = async () => {
+    try {
+      if (!outlineJSON && !coreOutline) {
+        messageApi.error('核心大纲缺失，无法生成分卷');
+        return;
+      }
+      const values = await formGenVolume.validate();
+      setVolumeStatus({ loading: true, msg: '正在规划分卷...' });
+      setGenVolumeVisible(false);
+
+      // Create new abort controller
+      if (abortControllerRef.current) abortControllerRef.current.abort();
+      abortControllerRef.current = new AbortController();
+
+      const volumeConfigs = [];
+      for (let i = 0; i < genVolumeCount; i++) {
+        volumeConfigs.push({
+          requirements: values[`volume_${i}_requirements`] || ''
+        });
+      }
+
+      const coordinator = new AgentCoordinator();
+      await coordinator.createVolumePlanFlow(
+        currentProject.id,
+        Number(values.count) || 4,
+        volumeConfigs,
+        { signal: abortControllerRef.current.signal }
+      );
+
+      const vols = await storageEx.getVolumes(currentProject.id);
+      setVolumes(vols);
+      setVolumeStatus({ loading: false, msg: '已生成' });
+      abortControllerRef.current = null;
+    } catch (e) {
+      if (e.name === 'AbortError' || e.message === 'aborted') {
+        setVolumeStatus({ loading: false, msg: '已停止生成' });
+        messageApi.info('已停止生成');
+      } else {
+        setVolumeStatus({ loading: false, msg: '生成失败' });
+        messageApi.error('生成失败');
+      }
+      abortControllerRef.current = null;
+    }
+  };
+
+  const refreshVolumes = async () => {
+    const vols = await storageEx.getVolumes(currentProject.id);
+    setVolumes(vols);
+  };
+
+  const handleOpenEditVolume = (v) => {
+    setEditingVolume(v);
+    setEditVolumeVisible(true);
+    formVolumeEdit.setFieldsValue({ name: v.name, description: v.description, order: v.order });
+  };
+
+  const handleSaveEditVolume = async () => {
+    const values = await formVolumeEdit.validate();
+    const updated = { ...editingVolume, name: values.name, description: values.description, order: Number(values.order) || editingVolume.order, updatedAt: new Date().toISOString() };
+    await storage.updateItem('volumes', updated);
+    await refreshVolumes();
+    setEditVolumeVisible(false);
+  };
+
+  const handleDeleteVolume = async (id) => {
+    // Delete all chapters associated with this volume
+    const chaptersToDelete = await storageEx.getChapterNodesByVolume(id);
+    for (const chapter of chaptersToDelete) {
+      await storage.deleteItem('chapter_nodes', chapter.id);
+    }
+
+    await storage.deleteItem('volumes', id);
+    // If the deleted volume was selected, clear selection
+    if (selectedVolumeId === id) {
+      setSelectedVolumeId(null);
+      setChapterNodes([]);
+    }
+    await refreshVolumes();
+  };
+
+  const handleMoveVolume = async (id, dir) => {
+    const sorted = [...volumes].sort((a, b) => a.order - b.order);
+    const idx = sorted.findIndex(v => v.id === id);
+    const targetIdx = dir === 'up' ? idx - 1 : idx + 1;
+    if (targetIdx < 0 || targetIdx >= sorted.length) return;
+    const a = sorted[idx];
+    const b = sorted[targetIdx];
+    const aOrder = a.order; const bOrder = b.order;
+    await storage.updateItem('volumes', { ...a, order: bOrder, updatedAt: new Date().toISOString() });
+    await storage.updateItem('volumes', { ...b, order: aOrder, updatedAt: new Date().toISOString() });
+    await refreshVolumes();
+  };
+
+  const toggleSelectVolume = (id, checked) => {
+    setSelectedVolumeIds(prev => {
+      const next = new Set(prev);
+      if (checked) next.add(id); else next.delete(id);
+      return next;
+    });
+  };
+
+  const handleSelectAll = () => {
+    const allIds = new Set(volumes.map(v => v.id));
+    setSelectedVolumeIds(allIds);
+  };
+
+  const handleInverseSelect = () => {
+    setSelectedVolumeIds(prev => {
+      const next = new Set();
+      volumes.forEach(v => {
+        if (!prev.has(v.id)) next.add(v.id);
+      });
+      return next;
+    });
+  };
+
+  const handleDeleteSelectedVolumes = async () => {
+    if (selectedVolumeIds.size === 0) return;
+    for (const id of Array.from(selectedVolumeIds)) {
+      const nodes = await storageEx.getChapterNodesByVolume(id);
+      for (const n of nodes) await storage.deleteItem('chapter_nodes', n.id);
+      await storage.deleteItem('volumes', id);
+      if (selectedVolumeId === id) {
+        setSelectedVolumeId(null);
+        setChapterNodes([]);
+      }
+    }
+    setSelectedVolumeIds(new Set());
+    await refreshVolumes();
+  };
+
+  const handleOpenRegenerateVolume = (v) => {
+    setRegenTargetVolume(v);
+    setRegenVolumeGuidance('');
+    setRegenVolumeVisible(true);
+  };
+
+  const handleRegenerateVolume = async () => {
+    if (!regenTargetVolume) return;
+    try {
+      setVolumeStatus({ loading: true, msg: `正在重新生成第 ${regenTargetVolume.order} 卷...` });
+      setRegenVolumeVisible(false);
+
+      const coordinator = new AgentCoordinator();
+      await coordinator.regenerateVolumeFlow(currentProject.id, regenTargetVolume.id, regenVolumeGuidance);
+
+      await refreshVolumes();
+      setVolumeStatus({ loading: false, msg: '重新生成完成' });
+      messageApi.success('分卷已重新生成');
+    } catch (e) {
+      console.error(e);
+      setVolumeStatus({ loading: false, msg: '重新生成失败' });
+      messageApi.error('重新生成失败');
+    }
+  };
+
+
+
+  const handleSelectVolume = async (vid) => {
+    setSelectedVolumeId(vid);
+    const nodes = await storageEx.getChapterNodesByVolume(vid);
+    setChapterNodes(nodes.sort((a, b) => a.order - b.order));
+  };
+
+  const handleOpenEditStructure = () => {
+    if (!outlineJSON) return;
+    setEditStructureVisible(true);
+    formStructure.setFieldsValue({
+      title: outlineJSON.title || '',
+      logline: outlineJSON.logline || '',
+      theme: outlineJSON.theme || '',
+      coreConflict: outlineJSON.coreConflict || '',
+      tone: outlineJSON.tone || '',
+      pacing: outlineJSON.pacing || '',
+      targetAudience: outlineJSON.targetAudience || '',
+      tags: outlineJSON.tags || [],
+      worldSettingDescription: outlineJSON.worldSetting?.description || outlineJSON.worldNotes || '',
+      worldSettingRules: outlineJSON.worldSetting?.rules || '',
+      characterArcProtagonist: outlineJSON.characterArcSummary?.protagonist || '',
+      characterArcAntagonist: outlineJSON.characterArcSummary?.antagonist || '',
+      characterArcs: outlineJSON.characterArcs || [],
+      plotProgression: outlineJSON.plotProgression || [],
+      ending: outlineJSON.ending || '',
+      worldNotes: outlineJSON.worldNotes || ''
+    });
+  };
+
+  const handleSaveStructure = async () => {
+    try {
+      const values = await formStructure.validate();
+      const newJSON = {
+        ...outlineJSON,
+        ...values,
+        worldSetting: {
+          description: values.worldSettingDescription,
+          rules: values.worldSettingRules
+        },
+        characterArcSummary: {
+          protagonist: values.characterArcProtagonist,
+          antagonist: values.characterArcAntagonist
+        }
+      };
+      // Cleanup flat fields used for form
+      delete newJSON.worldSettingDescription;
+      delete newJSON.worldSettingRules;
+      delete newJSON.characterArcProtagonist;
+      delete newJSON.characterArcAntagonist;
+
+      setOutlineJSON(newJSON);
+      const newText = JSON.stringify(newJSON, null, 2);
+      setCoreOutline(newText);
+      setEditStructureVisible(false);
+      // Optional: Auto-save to storage
+      await storageEx.updateCoreOutline(currentProject.id, { title: '核心大纲', content: newText });
+      setCoreStatus({ loading: false, msg: '已更新并保存' });
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+
+
+  const defaultPlanCount = 5;
+
+  const calculatePreviewChapters = async (total, vid) => {
+    if (!vid) return;
+    const v = volumes.find(vol => vol.id === vid);
+    if (!v) return;
+
+    // Determine start chapter (Global Numbering Logic)
+    let startChapter = v.startChapter;
+    if (!startChapter) {
+      if (v.order === 1) {
+        startChapter = 1;
+      } else {
+        const prevVol = volumes.find(vol => vol.order === v.order - 1);
+        if (prevVol && prevVol.endChapter) {
+          startChapter = prevVol.endChapter + 1;
+        } else {
+          const allNodesGlobal = await storageEx.getItems('chapter_nodes', { projectId: currentProject.id });
+          const otherNodes = allNodesGlobal.filter(n => n.volumeId !== vid);
+          const maxOtherOrder = otherNodes.length > 0 ? Math.max(...otherNodes.map(n => n.order)) : 0;
+          startChapter = maxOtherOrder + 1;
+        }
+      }
+    }
+    const endChapter = startChapter + total - 1;
+
+    const nodes = await storageEx.getChapterNodesByVolume(vid);
+    const existingOrders = new Set(nodes.map(n => n.order));
+
+    const toGenerate = [];
+    for (let order = startChapter; order <= endChapter; order++) {
+      if (!existingOrders.has(order)) {
+        toGenerate.push(order);
+      }
+    }
+    setPreviewChapters(toGenerate);
+
+    // Initialize passion levels for new chapters with random low levels
+    // 使用偏向低等级的随机算法：70% 概率是1级，20% 概率是2级，10% 概率是3级
+    // 但确保每3章至少有一章等级高于3（4级或5级）
+    setChapterPassionLevels(prev => {
+      const next = { ...prev };
+      const chapters = [...toGenerate];
+
+      // 先随机分配基础等级
+      chapters.forEach(order => {
+        if (!next[order]) {
+          const rand = Math.random();
+          if (rand < 0.7) {
+            next[order] = 1;  // 70% 概率
+          } else if (rand < 0.9) {
+            next[order] = 2;  // 20% 概率
+          } else {
+            next[order] = 3;  // 10% 概率
+          }
+        }
+      });
+
+      // 确保每3章至少有一章高于3级
+      for (let i = 0; i < chapters.length; i += 3) {
+        const group = chapters.slice(i, i + 3);
+        const hasHighLevel = group.some(order => next[order] > 3);
+
+        if (!hasHighLevel && group.length > 0) {
+          // 随机选择组内一章设为4级或5级
+          const randomIndex = Math.floor(Math.random() * group.length);
+          const selectedOrder = group[randomIndex];
+          next[selectedOrder] = Math.random() < 0.7 ? 4 : 5;  // 70% 4级, 30% 5级
+        }
+      }
+
+      return next;
+    });
+  };
+
+  const handlePlanNextChapterVolume = async (vid, cfg = {}) => {
+    const v = volumes.find(x => x.id === vid);
+    if (!v) return;
+
+    // Read character information for outline generation
+    const characters = await storage.getItemsByProject('characters', currentProject.id);
+
+    // Use "本卷计划章节数" (totalChaptersInVolume) from config, or default to 20 if not set
+    const totalChaptersInVolume = Number(cfg.totalChaptersInVolume) > 0 ? Number(cfg.totalChaptersInVolume) : 20;
+
+    // 动态计算起始章节号
+    let startChapter = 1;
+    if (v.order > 1) {
+      // 查找前一卷
+      const prevVol = volumes.find(vol => vol.order === v.order - 1);
+      if (prevVol && prevVol.id) {
+        // 获取前一卷的所有章节
+        const prevNodes = await storageEx.getChapterNodesByVolume(prevVol.id);
+        if (prevNodes.length > 0) {
+          const maxPrevOrder = Math.max(...prevNodes.map(n => n.order));
+          startChapter = maxPrevOrder + 1;
+        }
+      }
+    }
+
+    const endChapter = startChapter + totalChaptersInVolume - 1;
+
+    // 更新分卷的章节范围（动态计算，而非AI预设）
+    await storage.updateItem('volumes', {
+      ...v,
+      startChapter,
+      endChapter,
+      updatedAt: new Date().toISOString()
+    });
+
+    // 刷新分卷数据
+    await refreshVolumes();
+
+    // Identify gaps to fill
+    const nodes = await storageEx.getChapterNodesByVolume(vid);
+    const existingOrders = new Set(nodes.map(n => n.order));
+
+    const ordersToGenerate = [];
+    for (let order = startChapter; order <= endChapter; order++) {
+      if (!existingOrders.has(order)) {
+        ordersToGenerate.push(order);
+      }
+    }
+
+    if (ordersToGenerate.length === 0) {
+      messageApi.info(`本卷已有 ${nodes.length} 章，达到或超过计划的 ${totalChaptersInVolume} 章`);
+      return;
+    }
+
+    setVolumePlanStatus(prev => ({ ...prev, [vid]: `正在规划 ${ordersToGenerate.length} 章 (计划总数 ${totalChaptersInVolume})...` }));
+
+    // Initialize progress for interrupt recovery
+    const progress = {
+      volumeId: vid,
+      totalChapters: ordersToGenerate.length,
+      completedChapters: 0,
+      currentOrder: ordersToGenerate[0],
+      startTime: Date.now()
+    };
+    saveProgress(vid, progress);
+
+    // Create new abort controller
+    if (abortControllerRef.current) abortControllerRef.current.abort();
+    abortControllerRef.current = new AbortController();
+
+    let generatedCount = 0;
+    for (const nextOrder of ordersToGenerate) {
+      generatedCount++;
+      setVolumePlanStatus(prev => ({ ...prev, [vid]: `正在规划第 ${nextOrder} 章 (${generatedCount}/${ordersToGenerate.length})...` }));
+
+      // Prepare context
+      const safeCoreOutline = coreOutline && coreOutline.length > 10 ? coreOutline : (v.description || '无详细大纲');
+
+      // Previous Context
+      let previousChaptersSummary = '';
+      if (nextOrder > 1) {
+        try {
+          const recentOrders = [nextOrder - 3, nextOrder - 2, nextOrder - 1].filter(o => o > 0);
+          const allNodes = await storageEx.getItems('chapter_nodes', { projectId: currentProject.id });
+
+          const summaries = recentOrders.map(order => {
+            const node = allNodes.find(n => n.order === order);
+            let text = '';
+            if (node && node.summary) {
+              try {
+                const s = JSON.parse(node.summary);
+                text = s.oneSentence || (s.scenes ? JSON.stringify(s.scenes) : node.summary);
+              } catch { text = node.summary; }
+            }
+            return text ? `Chapter ${order}: ${text}` : null;
+          }).filter(Boolean);
+          previousChaptersSummary = summaries.join('\n');
+        } catch (err) { console.warn(err); }
+      }
+
+      // Next Context (for gap filling)
+      let nextChapterSummary = '';
+      try {
+        const allNodes = await storageEx.getItems('chapter_nodes', { projectId: currentProject.id });
+        const nextNode = allNodes.find(n => n.order === nextOrder + 1);
+        if (nextNode) {
+          let text = '';
+          try {
+            const s = JSON.parse(nextNode.summary);
+            text = s.oneSentence || (s.scenes ? JSON.stringify(s.scenes) : nextNode.summary);
+          } catch { text = nextNode.summary; }
+          nextChapterSummary = text;
+        }
+      } catch (err) { console.warn(err); }
+
+      const isLastChapterOfVolume = nextOrder === endChapter;
+      const passionLevel = chapterPassionLevels[nextOrder] || 1;
+      const passionDefinitions = await getPassionDefinitions();
+
+      try {
+        const outlinesData = await planner.generateVolumeChapterOutlines({
+          volumeTitle: v.name,
+          volumeDesc: v.description,
+          startChapter: nextOrder,
+          count: 1,
+          coreOutline: safeCoreOutline,
+          previousChaptersSummary,
+          characters: characters,
+          currentChapterCount: nodes.length + generatedCount - 1,
+          totalChaptersInVolume: totalChaptersInVolume,
+          isLastChapterOfVolume: isLastChapterOfVolume,
+          nextChapterSummary: nextChapterSummary,
+          passionLevel: passionLevel,
+          passionDefinitions: passionDefinitions,
+          projectId: currentProject.id,
+          signal: abortControllerRef.current.signal
+        });
+        const outline = outlinesData.chapters && outlinesData.chapters.length > 0 ? outlinesData.chapters[0] : null;
+        const title = outline ? outline.title : `第${nextOrder}章`;
+
+        const node = await storageEx.addChapterNode(currentProject.id, vid, {
+          order: nextOrder,
+          title,
+          passionLevel
+        });
+        const constraintsRows = await storageEx.getItems('constraints', { projectId: currentProject.id });
+        const constraintsText = constraintsRows.map(x => x.content).join('\n');
+
+        const text = await generateScenesWithRetry({
+          volumeTheme: v.description || v.name || '',
+          chapterOrder: nextOrder,
+          constraints: constraintsText,
+          desiredCount: 0,
+          chapterSummary: outline ? outline.summary : '',
+          coreOutline: safeCoreOutline,
+          isLastChapterOfVolume: isLastChapterOfVolume,
+          totalChaptersInVolume: totalChaptersInVolume,
+          nextChapterSummary: nextChapterSummary,
+          passionLevel: passionLevel,
+          passionDefinitions: passionDefinitions,
+          projectId: currentProject.id,
+          volumeId: vid,
+          signal: abortControllerRef.current.signal
+        });
+
+        let clean = typeof text === 'string' ? text : JSON.stringify(text);
+        if (typeof clean === 'string' && clean.includes('```')) clean = clean.replace(/```json\n?|```\n?|```/g, '');
+
+        // Parse scenes
+        let scenesObj = { scenes: [] };
+        try {
+          scenesObj = JSON.parse(clean);
+          if (!Array.isArray(scenesObj.scenes)) scenesObj.scenes = [];
+        } catch { scenesObj = { scenes: [] }; }
+
+        // Add chapter summary info from outline
+        if (outline) {
+          scenesObj.chapterTitle = outline.title;
+          scenesObj.oneSentence = outline.oneSentence || '';
+          scenesObj.summary = outline.summary || '';
+          scenesObj.mainConflict = outline.mainConflict;
+        }
+
+        await storage.updateItem('chapter_nodes', { ...node, summary: JSON.stringify(scenesObj), updatedAt: new Date().toISOString() });
+
+        // Refresh
+        const updated = await storageEx.getChapterNodesByVolume(vid);
+        setChapterNodesMap(prev => ({ ...prev, [vid]: updated.sort((a, b) => a.order - b.order) }));
+        if (selectedVolumeId === vid) {
+          setChapterNodes(updated.sort((a, b) => a.order - b.order));
+        }
+      } catch (e) {
+        if (e.name === 'AbortError' || e.message === 'aborted') {
+          messageApi.info(`第 ${nextOrder} 章生成已停止`);
+          // Break the loop if aborted
+          break;
+        }
+        console.error(e);
+        setVolumePlanStatus(prev => ({ ...prev, [vid]: `生成第 ${nextOrder} 章失败` }));
+      }
+
+      // Update progress
+      progress.completedChapters = generatedCount;
+      if (generatedCount < ordersToGenerate.length) {
+        progress.currentOrder = ordersToGenerate[generatedCount]; // Next order
+        saveProgress(vid, progress);
+      } else {
+        clearProgress(vid); // Finished
+      }
+    }
+    setVolumePlanStatus(prev => {
+      const next = { ...prev };
+      delete next[vid];
+      return next;
+    });
+    abortControllerRef.current = null;
+  };
+
+
+
+  const refreshChapters = async (vid) => {
+    const nodes = await storageEx.getChapterNodesByVolume(vid);
+    setChapterNodes(nodes.sort((a, b) => a.order - b.order));
+    setChapterNodesMap(prev => ({ ...prev, [vid]: nodes.sort((a, b) => a.order - b.order) }));
+  };
+
+
+
+
+
+  const parseScenes = (summaryText) => {
+    if (!summaryText) return [];
+    let text = summaryText;
+    if (text.includes('```')) text = text.replace(/```json\n?|```\n?|```/g, '');
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed?.scenes)) return parsed.scenes;
+    } catch { }
+    const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean);
+    return lines.map(l => ({ loc: '', action: l, outcome: '' }));
+  };
+
+  const stringifyScenes = (scenes) => {
+    return JSON.stringify({ scenes });
+  };
+
+  const deleteScene = async (chapter, idx) => {
+    const scenes = parseScenes(chapter.summary || '');
+    const next = scenes.filter((_, i) => i !== idx);
+    await storage.updateItem('chapter_nodes', { ...chapter, summary: stringifyScenes(next), updatedAt: new Date().toISOString() });
+    await refreshChapters(chapter.volumeId || selectedVolumeId);
+  };
+
+  const regenerateScenes = async (chapter, rewritePrompt = '') => {
+    const vol = volumes.find(v => v.id === (chapter.volumeId || selectedVolumeId));
+    const constraintsRows = await storageEx.getItems('constraints', { projectId: currentProject.id });
+    const constraintsText = constraintsRows.map(x => x.content).join('\n');
+
+    // Read character information for scene generation
+    const characters = await storage.getItemsByProject('characters', currentProject.id);
+
+    setSceneGenStatus(prev => ({ ...prev, [chapter.id]: 'generating' }));
+
+    // Prepare context for regeneration
+    let previousChaptersSummary = '';
+    let nextChapterSummary = '';
+    try {
+      const allNodes = await storageEx.getItems('chapter_nodes', { projectId: currentProject.id });
+
+      // Get previous chapters summary
+      const recentOrders = [chapter.order - 3, chapter.order - 2, chapter.order - 1].filter(o => o > 0);
+      const summaries = recentOrders.map(order => {
+        const node = allNodes.find(n => n.order === order);
+        let text = '';
+        if (node && node.summary) {
+          try {
+            const s = JSON.parse(node.summary);
+            text = s.oneSentence || (s.scenes ? JSON.stringify(s.scenes) : node.summary);
+          } catch { text = node.summary; }
+        }
+        return text ? `Chapter ${order}: ${text}` : null;
+      }).filter(Boolean);
+      previousChaptersSummary = summaries.join('\n');
+
+      // Get next chapter summary
+      const nextNode = allNodes.find(n => n.order === chapter.order + 1);
+      if (nextNode) {
+        let text = '';
+        try {
+          const s = JSON.parse(nextNode.summary);
+          text = s.oneSentence || (s.scenes ? JSON.stringify(s.scenes) : nextNode.summary);
+        } catch { text = nextNode.summary; }
+        nextChapterSummary = text;
+      }
+    } catch (err) { console.warn(err); }
+
+    // Determine if last chapter of volume
+    let isLastChapterOfVolume = false;
+    let totalChaptersInVolume = 20; // Default estimate
+    if (vol && vol.endChapter) {
+      isLastChapterOfVolume = chapter.order === vol.endChapter;
+      if (vol.startChapter) {
+        totalChaptersInVolume = vol.endChapter - vol.startChapter + 1;
+      }
+    }
+
+    // Get core outline
+    let safeCoreOutline = '';
+    try {
+      const coreOutlineRow = await storageEx.getCoreOutline(currentProject.id);
+      if (coreOutlineRow) {
+        safeCoreOutline = typeof coreOutlineRow.content === 'string' ? coreOutlineRow.content : JSON.stringify(coreOutlineRow.content);
+      }
+    } catch { }
+
+    // Get passion definitions
+    const passionDefinitions = await getPassionDefinitions();
+    const passionLevel = chapter.passionLevel || 1;
+
+    try {
+      // Step 1: Generate chapter summary (title, summary, mainConflict)
+      const planner = new PlannerAgent();
+      const outlinesData = await planner.generateVolumeChapterOutlines({
+        volumeTitle: vol?.name || '',
+        volumeDesc: vol?.description || '',
+        startChapter: chapter.order,
+        count: 1,
+        coreOutline: safeCoreOutline,
+        previousChaptersSummary,
+        characters: characters,
+        currentChapterCount: chapter.order - (vol?.startChapter || 1),
+        totalChaptersInVolume: totalChaptersInVolume,
+        isLastChapterOfVolume: isLastChapterOfVolume,
+        nextChapterSummary: nextChapterSummary,
+        passionLevel: passionLevel,
+        passionDefinitions: passionDefinitions,
+        projectId: currentProject.id
+      });
+
+      const outline = outlinesData.chapters && outlinesData.chapters.length > 0 ? outlinesData.chapters[0] : null;
+
+      // Step 2: Generate scene outline
+      const text = await generateScenesWithRetry({
+        volumeTheme: vol?.description || vol?.name || '',
+        chapterOrder: chapter.order,
+        constraints: constraintsText,
+        characters: characters,
+        rewritePrompt,
+        chapterSummary: outline ? outline.summary : '',
+        coreOutline: safeCoreOutline,
+        isLastChapterOfVolume,
+        totalChaptersInVolume,
+        nextChapterSummary,
+        passionLevel,
+        passionDefinitions,
+        projectId: currentProject.id,
+        volumeId: vol?.id
+      });
+
+      let clean = typeof text === 'string' ? text : JSON.stringify(text);
+      if (typeof clean === 'string' && clean.includes('```')) clean = clean.replace(/```json\n?|```\n?|```/g, '');
+
+      // Parse scenes
+      let scenesObj = { scenes: [] };
+      try {
+        scenesObj = JSON.parse(clean);
+        if (!Array.isArray(scenesObj.scenes)) scenesObj.scenes = [];
+      } catch { scenesObj = { scenes: [] }; }
+
+      // Add chapter summary info from outline
+      if (outline) {
+        scenesObj.chapterTitle = outline.title;
+        scenesObj.oneSentence = outline.oneSentence || '';
+        scenesObj.summary = outline.summary || '';
+        scenesObj.mainConflict = outline.mainConflict;
+      }
+
+      await storage.updateItem('chapter_nodes', { ...chapter, summary: JSON.stringify(scenesObj), updatedAt: new Date().toISOString() });
+
+      // Refresh UI to show new summary
+      await refreshChapters(chapter.volumeId || selectedVolumeId);
+
+      setSceneGenStatus(prev => {
+        const next = { ...prev };
+        delete next[chapter.id];
+        return next;
+      });
+
+      messageApi.success('章节概要已重新生成');
+    } catch (error) {
+      console.error('Failed to regenerate chapter outline:', error);
+      setSceneGenStatus(prev => {
+        const next = { ...prev };
+        delete next[chapter.id];
+        return next;
+      });
+      messageApi.error('生成失败');
+    }
+  };
+
+  const handleDeleteChapter = async (node) => {
+    try {
+      // Optimistic UI update: Remove immediately from state
+      setChapterNodesMap(prev => ({
+        ...prev,
+        [node.volumeId]: (prev[node.volumeId] || []).filter(n => n.id !== node.id)
+      }));
+      if (selectedVolumeId === node.volumeId) {
+        setChapterNodes(prev => prev.filter(n => n.id !== node.id));
+      }
+
+      await storage.deleteItem('chapter_nodes', node.id);
+      messageApi.success('章节已删除');
+
+      // Refresh from server/storage to ensure consistency
+      const updated = await storageEx.getChapterNodesByVolume(node.volumeId);
+      setChapterNodesMap(prev => ({ ...prev, [node.volumeId]: updated.sort((a, b) => a.order - b.order) }));
+      if (selectedVolumeId === node.volumeId) {
+        setChapterNodes(updated.sort((a, b) => a.order - b.order));
+      }
+    } catch (error) {
+      console.error('Failed to delete chapter:', error);
+      messageApi.error('删除失败');
+      // Revert optimistic update if needed by refreshing
+      await refreshChapters(node.volumeId);
+    }
+  };
+
+  const toggleSelectChapter = (vid, cid, checked) => {
+    setSelectedChapterIdsByVolume(prev => {
+      const set = new Set(prev[vid] || []);
+      if (checked) set.add(cid); else set.delete(cid);
+      return { ...prev, [vid]: set };
+    });
+  };
+
+  const handleSelectAllChapters = (vid) => {
+    const ids = new Set((chapterNodesMap[vid] || []).map(n => n.id));
+    setSelectedChapterIdsByVolume(prev => ({ ...prev, [vid]: ids }));
+  };
+
+  const handleInvertSelectChapters = (vid) => {
+    const ids = new Set();
+    const current = selectedChapterIdsByVolume[vid] || new Set();
+    for (const n of (chapterNodesMap[vid] || [])) {
+      if (!current.has(n.id)) ids.add(n.id);
+    }
+    setSelectedChapterIdsByVolume(prev => ({ ...prev, [vid]: ids }));
+  };
+
+  const handleBatchDeleteChapters = async (vid) => {
+    const sel = selectedChapterIdsByVolume[vid] || new Set();
+    if (sel.size === 0) return;
+    setChapterBatchStatusByVolume(prev => ({ ...prev, [vid]: `正在删除 ${sel.size} 个章节...` }));
+    for (const id of Array.from(sel)) {
+      await storage.deleteItem('chapter_nodes', id);
+    }
+    await refreshChapters(vid);
+    setSelectedChapterIdsByVolume(prev => ({ ...prev, [vid]: new Set() }));
+    setChapterBatchStatusByVolume(prev => ({ ...prev, [vid]: '' }));
+    messageApi.success('已删除选中章节');
+  };
+
+
+
+
+  const handleOpenGenerateChaptersModal = (vid) => {
+    setGenChaptersVolumeId(vid);
+    setGenChaptersVisible(true);
+    formGenChapters.setFieldsValue({ totalChaptersInVolume: 20 });
+    // Trigger calculation
+    calculatePreviewChapters(20, vid);
+  };
+
+  const handleGenerateChapters = async () => {
+    try {
+      const values = await formGenChapters.validate();
+      setGenChaptersVisible(false);
+      await handlePlanNextChapterVolume(genChaptersVolumeId, values);
+    } catch { }
+  };
+
+  const handleResumeGeneration = async () => {
+    if (!generationProgress) return;
+    setShowResumeModal(false);
+    const { volumeId } = generationProgress;
+
+    const v = volumes.find(vol => vol.id === volumeId);
+    if (v) {
+      messageApi.info('正在恢复章节生成任务...');
+      await handlePlanNextChapterVolume(volumeId, { totalChaptersInVolume: generationProgress.totalChapters });
+    }
+  };
+
+
+
+  const renderVolumePlan = () => {
+    if (!volumes.length) return null;
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        {volumes.sort((a, b) => a.order - b.order).map(v => (
+          <Card key={v.id} style={{ background: 'var(--color-fill-2)' }} title={<Space><Text bold>{`第 ${v.order} 卷：${v.name}`}</Text></Space>} extra={<Text type="secondary">{v.startChapter ? `第 ${v.startChapter} 章` : ''}</Text>}>
+            <div style={{ marginBottom: 8 }}>{v.description}</div>
+            {v.goal && (<div style={{ marginBottom: 12 }}><Text type="secondary">主要目标：</Text>{v.goal}</div>)}
+            <div style={{ marginBottom: 12 }}>
+              <Space>
+                {volumePlanStatus[v.id] ? (
+                  <Button type="primary" status="danger" onClick={() => {
+                    if (abortControllerRef.current) {
+                      abortControllerRef.current.abort();
+                      abortControllerRef.current = null;
+                    }
+                  }}>停止生成</Button>
+                ) : (
+                  <Button type="primary" onClick={() => handleOpenGenerateChaptersModal(v.id)}>生成章节大纲</Button>
+                )}
+                {/* Settings button removed as it is now integrated into the main action */}
+                {volumePlanStatus[v.id] && <span style={{ color: 'var(--color-text-3)', fontSize: 12 }}>{volumePlanStatus[v.id]}</span>}
+              </Space>
+            </div>
+            <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {(chapterNodesMap[v.id] || []).map(n => {
+                const scenes = parseScenes(n.summary || '');
+                // Extract chapter summary
+                let chapterSummary = '';
+                let oneSentence = '';
+                let detailedSummary = '';
+                try {
+                  const parsed = JSON.parse(n.summary || '{}');
+                  chapterSummary = parsed.chapterTitle || '';
+                  oneSentence = parsed.oneSentence || '';
+                  detailedSummary = parsed.summary || '';
+                } catch { }
+
+                // Helper to find character with loose matching
+                const findMatchedChar = (name) => {
+                  const cleanName = name?.replace(/['"]/g, '').trim(); // Remove quotes and trim
+                  if (!cleanName) return null;
+                  return characters.find(c => {
+                    const dbName = c.name?.trim();
+                    if (!dbName) return false;
+                    // Precise match
+                    if (dbName === cleanName) return true;
+                    // Partial match (only if length > 1 to avoid matching single letters excessively)
+                    if (cleanName.length > 1 && dbName.length > 1) {
+                      return dbName.includes(cleanName) || cleanName.includes(dbName);
+                    }
+                    return false;
+                  });
+                };
+
+                const uniqueCharNames = [...new Set(scenes.flatMap(s => s.characters || []))];
+                const knownCharNames = uniqueCharNames.filter(name => findMatchedChar(name));
+                const unknownCharNames = uniqueCharNames.filter(name => !findMatchedChar(name));
+
+                return (
+                  <Card
+                    key={n.id}
+                    style={{ background: 'var(--color-fill-1)' }}
+                    title={
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                        <Space>
+                          <Checkbox checked={(selectedChapterIdsByVolume[v.id] || new Set()).has(n.id)} onChange={(val) => toggleSelectChapter(v.id, n.id, val)} />
+                          <Text bold>{`第 ${n.order} 章：${n.title || ''}`}</Text>
+                        </Space>
+
+                        {/* Chapter Character Avatars */}
+                        {(knownCharNames.length > 0 || unknownCharNames.length > 0) && (
+                          <div style={{ display: 'flex', gap: 4, marginRight: 12, alignItems: 'center' }}>
+                            {knownCharNames.map((charName, idx) => {
+                              const char = findMatchedChar(charName);
+                              return (
+                                <Tooltip key={idx} content={charName}>
+                                  <div style={{
+                                    width: 24,
+                                    height: 24,
+                                    borderRadius: '50%',
+                                    overflow: 'hidden',
+                                    background: char?.avatar ? 'transparent' : 'linear-gradient(135deg, var(--color-fill-3) 0%, var(--color-bg-3) 100%)',
+                                    border: '1px solid var(--color-border-2)',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    flexShrink: 0,
+                                    cursor: 'default'
+                                  }}>
+                                    {char?.avatar ? (
+                                      <img
+                                        src={char.avatar}
+                                        alt={charName}
+                                        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                                      />
+                                    ) : (
+                                      <span style={{ fontSize: 10, fontWeight: 'bold', color: 'var(--color-text-4)' }}>
+                                        {charName?.[0] || '?'}
+                                      </span>
+                                    )}
+                                  </div>
+                                </Tooltip>
+                              );
+                            })}
+                            {unknownCharNames.length > 0 && (
+                              <Tooltip content={
+                                <div>
+                                  <div style={{ fontWeight: 'bold', marginBottom: 4 }}>其他角色:</div>
+                                  {unknownCharNames.map((name, idx) => (
+                                    <div key={idx}>• {name}</div>
+                                  ))}
+                                </div>
+                              }>
+                                <div style={{
+                                  width: 24,
+                                  height: 24,
+                                  borderRadius: '50%',
+                                  background: 'var(--color-fill-3)',
+                                  border: '1px solid var(--color-border-2)',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  flexShrink: 0,
+                                  cursor: 'default'
+                                }}>
+                                  <span style={{ fontSize: 9, fontWeight: 'bold', color: 'var(--color-text-3)' }}>
+                                    +{unknownCharNames.length}
+                                  </span>
+                                </div>
+                              </Tooltip>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    }
+                    extra={<Space><Popover position="br" trigger="click" popupVisible={chapterOptionsVisible === n.id} onVisibleChange={(vis) => setChapterOptionsVisible(vis ? n.id : null)} content={<div style={{ width: 240 }}><div style={{ marginBottom: 8 }}>重写要求</div><Input.TextArea rows={3} value={sceneRewriteMap[n.id] || ''} onChange={(val) => setSceneRewriteMap(prev => ({ ...prev, [n.id]: val }))} placeholder="例如：突出悬疑氛围，减少说明性段落" /><div style={{ marginTop: 12, display: 'flex', justifyContent: 'flex-end' }}><Space><Button onClick={() => setChapterOptionsVisible(null)}>取消</Button><Button type="primary" loading={sceneGenStatus[n.id] === 'generating'} onClick={async () => { await regenerateScenes(n, sceneRewriteMap[n.id] || ''); setChapterOptionsVisible(null); }}>确定生成</Button></Space></div></div>}><Button size="small" icon={<IconSync />} onClick={() => setChapterOptionsVisible(n.id)}>重新生成</Button></Popover><Popconfirm title="确定删除此章节吗？" onOk={() => handleDeleteChapter(n)}><Button size="small" status="danger" icon={<IconDelete />} /></Popconfirm></Space>}
+                  >
+                    {oneSentence && (
+                      <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <Text bold style={{ color: 'var(--color-text-1)', flexShrink: 0 }}>💡 一句话：</Text>
+                        {editingSummaryId === n.id ? (
+                          <Input.TextArea
+                            autoSize
+                            defaultValue={oneSentence}
+                            onBlur={(e) => {
+                              // Simple save on blur or add a save button
+                            }}
+                            onPressEnter={async (e) => {
+                              const val = e.target.value;
+                              try {
+                                const parsed = JSON.parse(n.summary || '{}');
+                                parsed.oneSentence = val;
+                                await storage.updateItem('chapter_nodes', { ...n, summary: JSON.stringify(parsed), updatedAt: new Date().toISOString() });
+                                setEditingSummaryId(null);
+                                await refreshChapters(v.id);
+                                messageApi.success('概要已更新');
+                              } catch { }
+                            }}
+                          />
+                        ) : (
+                          <Text type="secondary">{oneSentence}</Text>
+                        )}
+                        <Button size="mini" type="text" icon={<IconEdit />} onClick={() => setEditingSummaryId(n.id)} />
+                        {editingSummaryId === n.id && <Button size="mini" type="text" onClick={() => setEditingSummaryId(null)}>取消</Button>}
+                      </div>
+                    )}
+
+                    {detailedSummary && (
+                      <Collapse style={{ marginBottom: 12 }}>
+                        <Collapse.Item
+                          header={<Text bold style={{ color: 'var(--color-text-1)' }}>📝 详细概要</Text>}
+                          name="summary"
+                          extra={<Button size="mini" type="text" icon={<IconEdit />} onClick={(e) => { e.stopPropagation(); setEditingDetailedSummaryId(n.id); }} />}
+                        >
+                          {editingDetailedSummaryId === n.id ? (
+                            <div>
+                              <Input.TextArea
+                                autoSize={{ minRows: 3, maxRows: 10 }}
+                                defaultValue={detailedSummary}
+                                id={`detailed-summary-${n.id}`}
+                              />
+                              <div style={{ marginTop: 8, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                                <Button size="small" onClick={() => setEditingDetailedSummaryId(null)}>取消</Button>
+                                <Button size="small" type="primary" onClick={async () => {
+                                  const val = document.getElementById(`detailed-summary-${n.id}`).value;
+                                  try {
+                                    const parsed = JSON.parse(n.summary || '{}');
+                                    parsed.summary = val;
+                                    await storage.updateItem('chapter_nodes', { ...n, summary: JSON.stringify(parsed), updatedAt: new Date().toISOString() });
+                                    setEditingDetailedSummaryId(null);
+                                    await refreshChapters(v.id);
+                                    messageApi.success('详细概要已更新');
+                                  } catch (err) {
+                                    messageApi.error('保存失败');
+                                  }
+                                }}>保存</Button>
+                              </div>
+                            </div>
+                          ) : (
+                            <Paragraph style={{ margin: 0, fontSize: 13, color: 'var(--color-text-2)', lineHeight: 1.6 }}>
+                              {detailedSummary}
+                            </Paragraph>
+                          )}
+                        </Collapse.Item>
+                      </Collapse>
+                    )}
+
+                    {/* Causality Info Display (Collapsible) */}
+                    {(() => {
+                      const parsed = JSON.parse(n.summary || '{}');
+                      const goal = parsed.chapterGoal || n.chapterGoal;
+                      const outcome = parsed.chapterOutcome || n.chapterOutcome;
+                      const openQ = parsed.openQuestions || n.openQuestions;
+                      const resolvedQ = parsed.resolvedQuestions || n.resolvedQuestions;
+
+                      const hasCausality = goal || outcome || (openQ && openQ.length > 0) || (resolvedQ && resolvedQ.length > 0);
+
+                      if (!hasCausality) return null;
+
+                      return (
+                        <Collapse style={{ marginBottom: 12 }}>
+                          <Collapse.Item header={<Text bold style={{ color: 'var(--color-text-1)' }}>🔗 因果与悬念</Text>} name="causality">
+                            <div style={{ padding: '8px 4px', fontSize: 13 }}>
+                              {goal && (
+                                <div style={{ marginBottom: 12 }}>
+                                  <Text bold style={{ display: 'block', marginBottom: 4 }}>🎯 本章目标：</Text>
+                                  <Text style={{ color: 'var(--color-text-2)' }}>{goal}</Text>
+                                </div>
+                              )}
+                              {outcome && (
+                                <div style={{ marginBottom: 12 }}>
+                                  <Text bold style={{ display: 'block', marginBottom: 4 }}>🏁 本章结果：</Text>
+                                  <Text style={{ color: 'var(--color-text-2)' }}>{outcome}</Text>
+                                </div>
+                              )}
+                              {openQ && openQ.length > 0 && (
+                                <div style={{ marginBottom: 12 }}>
+                                  <Text bold style={{ display: 'block', marginBottom: 4, color: 'var(--color-warning-6)' }}>❓ 遗留悬念：</Text>
+                                  <div style={{ paddingLeft: 8 }}>
+                                    {openQ.map((q, idx) => (
+                                      <div key={idx} style={{ marginBottom: 4, color: 'var(--color-text-2)' }}>• {q}</div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                              {resolvedQ && resolvedQ.length > 0 && (
+                                <div>
+                                  <Text bold style={{ display: 'block', marginBottom: 4, color: 'var(--color-success-6)' }}>✅ 已解决：</Text>
+                                  <div style={{ paddingLeft: 8 }}>
+                                    {resolvedQ.map((q, idx) => (
+                                      <div key={idx} style={{ marginBottom: 4, color: 'var(--color-text-2)' }}>• {q}</div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </Collapse.Item>
+                        </Collapse>
+                      );
+                    })()}
+                    <Collapse>
+                      <Collapse.Item header="场景列表" name="scenes">
+                        {scenes.length > 0 ? (
+                          <Collapse accordion>
+                            {scenes.map((s, idx) => (
+                              <Collapse.Item
+                                key={idx}
+                                header={<Space><Text bold>{`场景 ${idx + 1}`}</Text><Text type="secondary">{s.location || s.loc} - {s.action ? (s.action.length > 20 ? s.action.slice(0, 20) + '...' : s.action) : '无行动'}</Text></Space>}
+                                name={String(idx)}
+                                extra={<Popconfirm title="确定删除此场景？" onOk={(e) => { e.stopPropagation(); deleteScene(n, idx); }}><Button size="mini" type="text" status="danger" icon={<IconDelete />} onClick={(e) => e.stopPropagation()} /></Popconfirm>}
+                              >
+                                {editingSceneId === `${n.id}-${idx}` ? (
+                                  <div style={{ display: 'grid', gap: 12 }}>
+                                    <div>
+                                      <Text bold style={{ display: 'block', marginBottom: 4 }}>地点：</Text>
+                                      <Input defaultValue={s.location || s.loc} id={`scene-location-${n.id}-${idx}`} />
+                                    </div>
+                                    <div>
+                                      <Text bold style={{ display: 'block', marginBottom: 4 }}>角色：</Text>
+                                      <InputTag defaultValue={s.characters || []} id={`scene-characters-${n.id}-${idx}`} placeholder="输入角色名后按回车" />
+                                    </div>
+                                    <div>
+                                      <Text bold style={{ display: 'block', marginBottom: 4 }}>行动：</Text>
+                                      <Input.TextArea autoSize={{ minRows: 2 }} defaultValue={s.action} id={`scene-action-${n.id}-${idx}`} />
+                                    </div>
+                                    <div>
+                                      <Text bold style={{ display: 'block', marginBottom: 4 }}>冲突：</Text>
+                                      <Input.TextArea autoSize={{ minRows: 2 }} defaultValue={s.conflict} id={`scene-conflict-${n.id}-${idx}`} />
+                                    </div>
+                                    <div>
+                                      <Text bold style={{ display: 'block', marginBottom: 4 }}>结果：</Text>
+                                      <Input.TextArea autoSize={{ minRows: 2 }} defaultValue={s.outcome} id={`scene-outcome-${n.id}-${idx}`} />
+                                    </div>
+                                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                                      <Button size="small" onClick={() => setEditingSceneId(null)}>取消</Button>
+                                      <Button size="small" type="primary" onClick={async () => {
+                                        try {
+                                          const parsed = JSON.parse(n.summary || '{}');
+                                          const updatedScenes = [...(parsed.scenes || [])];
+                                          updatedScenes[idx] = {
+                                            ...updatedScenes[idx],
+                                            location: document.getElementById(`scene-location-${n.id}-${idx}`).value,
+                                            characters: document.getElementById(`scene-characters-${n.id}-${idx}`).__arco_input_tag_value__ || [],
+                                            action: document.getElementById(`scene-action-${n.id}-${idx}`).value,
+                                            conflict: document.getElementById(`scene-conflict-${n.id}-${idx}`).value,
+                                            outcome: document.getElementById(`scene-outcome-${n.id}-${idx}`).value
+                                          };
+                                          parsed.scenes = updatedScenes;
+                                          await storage.updateItem('chapter_nodes', { ...n, summary: JSON.stringify(parsed), updatedAt: new Date().toISOString() });
+                                          setEditingSceneId(null);
+                                          await refreshChapters(v.id);
+                                          messageApi.success('场景已更新');
+                                        } catch (err) {
+                                          messageApi.error('保存失败');
+                                        }
+                                      }}>保存</Button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div>
+                                    <div style={{ display: 'grid', gap: 8, marginBottom: 12 }}>
+                                      {(s.location || s.loc) && (<div><Text bold>地点：</Text>{s.location || s.loc}</div>)}
+                                      {Array.isArray(s.characters) && s.characters.length > 0 && (<div><Text bold>角色：</Text>{s.characters.join('、')}</div>)}
+                                      {s.action && (<div><Text bold>行动：</Text>{s.action}</div>)}
+                                      {s.conflict && (<div><Text bold>冲突：</Text>{s.conflict}</div>)}
+                                      {s.outcome && (<div><Text bold>结果：</Text>{s.outcome}</div>)}
+                                    </div>
+                                    <Button size="small" icon={<IconEdit />} onClick={() => setEditingSceneId(`${n.id}-${idx}`)}>编辑场景</Button>
+                                  </div>
+                                )}
+                              </Collapse.Item>
+                            ))}
+                          </Collapse>
+                        ) : (
+                          <div style={{ padding: 16, textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+                            <Text type="secondary">暂无场景列表</Text>
+                            <Button
+                              type="primary"
+                              size="small"
+                              onClick={() => regenerateScenes(n)}
+                              loading={sceneGenStatus[n.id] === 'generating'}
+                            >
+                              生成场景列表
+                            </Button>
+                          </div>
+                        )}
+                      </Collapse.Item>
+                    </Collapse>
+                  </Card>
+                );
+              })}
+              <div style={{ display: 'flex', alignItems: 'center', marginTop: 12, borderTop: '1px solid var(--color-border-1)', paddingTop: 12 }}>
+                <Space>
+                  <Button onClick={() => handleSelectAllChapters(v.id)}>全选</Button>
+                  <Button onClick={() => handleInvertSelectChapters(v.id)}>反选</Button>
+                  <Popconfirm title="确定删除选中的章节吗？" onOk={() => handleBatchDeleteChapters(v.id)}>
+                    <Button status="danger" disabled={!selectedChapterIdsByVolume[v.id] || selectedChapterIdsByVolume[v.id].size === 0}>批量删除</Button>
+                  </Popconfirm>
+
+                  {chapterBatchStatusByVolume[v.id] && <span style={{ color: 'var(--color-text-3)', fontSize: 12 }}>{chapterBatchStatusByVolume[v.id]}</span>}
+                </Space>
+              </div>
+            </div>
+          </Card>
+        ))}
+      </div>
+    );
+  };
+
+  const renderStructuredOutline = () => {
+    if (!outlineJSON) return <div>暂无结构化大纲或解析失败</div>;
+    const { title, logline, theme, coreConflict, tone, pacing, targetAudience, tags, worldSetting, characterArcSummary, plotProgression, ending, worldNotes } = outlineJSON;
+
+    const isEditing = editingModule !== null;
+
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {/* Basic Info Module */}
+        <Card size="small" title={<Text bold>📋 基本信息</Text>}>
+          {isEditing ? (
+            <div style={{ display: 'grid', gap: 12 }}>
+              <div>
+                <Text bold style={{ display: 'block', marginBottom: 4 }}>标题</Text>
+                <Input value={moduleEditData.title || ''} onChange={(val) => setModuleEditData(prev => ({ ...prev, title: val }))} />
+              </div>
+              <div>
+                <Text bold style={{ display: 'block', marginBottom: 4 }}>一句话摘要</Text>
+                <Input.TextArea autoSize value={moduleEditData.logline || ''} onChange={(val) => setModuleEditData(prev => ({ ...prev, logline: val }))} />
+              </div>
+              <div>
+                <Text bold style={{ display: 'block', marginBottom: 4 }}>主题</Text>
+                <Input value={moduleEditData.theme || ''} onChange={(val) => setModuleEditData(prev => ({ ...prev, theme: val }))} />
+              </div>
+              <div>
+                <Text bold style={{ display: 'block', marginBottom: 4 }}>核心冲突</Text>
+                <Input.TextArea autoSize value={moduleEditData.coreConflict || ''} onChange={(val) => setModuleEditData(prev => ({ ...prev, coreConflict: val }))} />
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gap: 8 }}>
+              {title && <div><Text bold>标题：</Text>{title}</div>}
+              {logline && <div><Text bold>一句话摘要：</Text>{logline}</div>}
+              {theme && <div><Text bold>主题：</Text>{theme}</div>}
+              {coreConflict && <div><Text bold>核心冲突：</Text>{coreConflict}</div>}
+            </div>
+          )}
+        </Card>
+
+        {/* Tone & Pacing & Audience & Tags */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <Card size="small" title={<Text bold>基调</Text>}>
+            {isEditing ? (
+              <Input value={moduleEditData.tone || ''} onChange={(val) => setModuleEditData(prev => ({ ...prev, tone: val }))} />
+            ) : (
+              <div style={{ marginTop: 8 }}>{tone || '-'}</div>
+            )}
+          </Card>
+          <Card size="small" title={<Text bold>节奏</Text>}>
+            {isEditing ? (
+              <Input value={moduleEditData.pacing || ''} onChange={(val) => setModuleEditData(prev => ({ ...prev, pacing: val }))} />
+            ) : (
+              <div style={{ marginTop: 8 }}>{pacing || '-'}</div>
+            )}
+          </Card>
+          <Card size="small" title={<Text bold>目标受众</Text>}>
+            {isEditing ? (
+              <Input value={moduleEditData.targetAudience || ''} onChange={(val) => setModuleEditData(prev => ({ ...prev, targetAudience: val }))} />
+            ) : (
+              <div style={{ marginTop: 8 }}>{targetAudience || '-'}</div>
+            )}
+          </Card>
+          <Card size="small" title={<Text bold>标签</Text>}>
+            {isEditing ? (
+              <InputTag
+                value={moduleEditData.tags || []}
+                onChange={(val) => setModuleEditData(prev => ({ ...prev, tags: val }))}
+                placeholder="输入标签后回车"
+              />
+            ) : (
+              <div style={{ marginTop: 8 }}>
+                {tags && tags.length > 0 ? <Space wrap>{tags.map(t => <Tag key={t}>{t}</Tag>)}</Space> : '-'}
+              </div>
+            )}
+          </Card>
+        </div>
+
+        {/* World Setting Module */}
+        <Card size="small" title={<Text bold>🌍 世界观设定</Text>}>
+          {isEditing ? (
+            <div style={{ display: 'grid', gap: 12 }}>
+              <div>
+                <Text bold style={{ display: 'block', marginBottom: 4 }}>描述</Text>
+                <Input.TextArea
+                  rows={3}
+                  value={moduleEditData.worldSetting?.description || moduleEditData.worldNotes || ''}
+                  onChange={(val) => setModuleEditData(prev => ({
+                    ...prev,
+                    worldSetting: { ...(prev.worldSetting || {}), description: val }
+                  }))}
+                />
+              </div>
+              <div>
+                <Text bold style={{ display: 'block', marginBottom: 4 }}>规则</Text>
+                <Input.TextArea
+                  rows={3}
+                  value={moduleEditData.worldSetting?.rules || ''}
+                  onChange={(val) => setModuleEditData(prev => ({
+                    ...prev,
+                    worldSetting: { ...(prev.worldSetting || {}), rules: val }
+                  }))}
+                />
+              </div>
+            </div>
+          ) : (
+            <div style={{ marginTop: 8 }}>
+              {worldSetting ? (
+                <>
+                  <div><Text bold>描述：</Text>{worldSetting.description}</div>
+                  <div style={{ marginTop: 8 }}><Text bold>规则：</Text>{worldSetting.rules}</div>
+                </>
+              ) : (worldNotes || '-')}
+            </div>
+          )}
+        </Card>
+
+        {/* Characters Module */}
+        <Card size="small" title={<Text bold>👥 角色设定</Text>}>
+          {isEditing ? (
+            <div style={{ marginTop: 8 }}>
+              <Text type="secondary">请前往“角色管理”页面进行详细编辑</Text>
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12, marginTop: 8 }}>
+              {outlineJSON?.characters && outlineJSON.characters.length > 0 ? (
+                outlineJSON.characters.map((charOutline, index) => {
+                  // Find matching live character data for avatar
+                  const liveChar = characters.find(c => c.name === charOutline.name);
+                  const avatarSrc = liveChar?.avatar;
+
+                  return (
+                    <Card key={index} size="small" style={{ border: '1px solid var(--color-border-2)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                        <Popover
+                          title={charOutline.name}
+                          content={
+                            <div style={{ maxWidth: 300 }}>
+                              <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                                <Tag size="small" color="arcoblue">{charOutline.role}</Tag>
+                                <Tag size="small">{charOutline.age || '未知年龄'}</Tag>
+                              </div>
+                              <Paragraph style={{ marginBottom: 8 }}>
+                                <Text bold>简介：</Text>
+                                {charOutline.personality || charOutline.description || charOutline.bio || '-'}
+                              </Paragraph>
+                              {charOutline.arc && (
+                                <Paragraph>
+                                  <Text bold>成长弧光：</Text>
+                                  {charOutline.arc}
+                                </Paragraph>
+                              )}
+                            </div>
+                          }
+                        >
+                          {avatarSrc ? (
+                            <Avatar shape="circle" size={40} style={{ cursor: 'pointer' }}>
+                              <img src={avatarSrc} alt={charOutline.name} />
+                            </Avatar>
+                          ) : (
+                            <Avatar style={{ backgroundColor: '#165DFF', cursor: 'pointer' }}>
+                              {charOutline.name ? charOutline.name[0] : 'User'}
+                            </Avatar>
+                          )}
+                        </Popover>
+                        <div>
+                          <Text bold style={{ display: 'block' }}>{charOutline.name}</Text>
+                          <Tag size="small" style={{ marginTop: 4 }}>{charOutline.role}</Tag>
+                        </div>
+                      </div>
+                    </Card>
+                  );
+                })
+              ) : (
+                <Text type="secondary">-</Text>
+              )}
+            </div>
+          )}
+        </Card>
+
+        {/* Plot Progression Module */}
+        <Card size="small" title={<Text bold>📖 剧情走向</Text>}>
+          {isEditing ? (
+            <div style={{ display: 'grid', gap: 8 }}>
+              {(moduleEditData.plotProgression || []).map((item, index) => (
+                <div key={index} style={{ display: 'flex', gap: 8 }}>
+                  <Input.TextArea
+                    autoSize
+                    value={item}
+                    onChange={(val) => {
+                      const newPlot = [...(moduleEditData.plotProgression || [])];
+                      newPlot[index] = val;
+                      setModuleEditData(prev => ({ ...prev, plotProgression: newPlot }));
+                    }}
+                  />
+                  <Button
+                    icon={<IconDelete />}
+                    status="danger"
+                    onClick={() => {
+                      const newPlot = (moduleEditData.plotProgression || []).filter((_, i) => i !== index);
+                      setModuleEditData(prev => ({ ...prev, plotProgression: newPlot }));
+                    }}
+                  />
+                </div>
+              ))}
+              <Button onClick={() => setModuleEditData(prev => ({
+                ...prev,
+                plotProgression: [...(prev.plotProgression || []), '']
+              }))}>添加剧情节点</Button>
+            </div>
+          ) : (
+            <List
+              size="small"
+              dataSource={plotProgression || []}
+              render={(item, index) => (
+                <List.Item key={index}>
+                  {typeof item === 'object' && item !== null ? (
+                    item.description || item.summary || item.text || JSON.stringify(item)
+                  ) : (
+                    item
+                  )}
+                </List.Item>
+              )}
+              style={{ marginTop: 8 }}
+            />
+          )}
+        </Card>
+
+        {/* Ending */}
+        <Card size="small" title={<Text bold>结局</Text>}>
+          {isEditing ? (
+            <Input.TextArea
+              autoSize
+              value={moduleEditData.ending || ''}
+              onChange={(val) => setModuleEditData(prev => ({ ...prev, ending: val }))}
+            />
+          ) : (
+            <div style={{ marginTop: 8 }}>{ending || '-'}</div>
+          )}
+        </Card>
+      </div>
+    );
+  };
+
+  return (
+    <div style={{ padding: screens.xs ? 12 : 24, maxWidth: 1000, margin: '0 auto' }}>
+      {messageHolder}
+      <Title heading={2}>大纲架构</Title>
+
+      <Card
+        title="核心大纲"
+        style={{ marginBottom: 24 }}
+        body={{ style: { padding: screens.xs ? '12px' : '24px' } }}
+        extra={
+          <Button type="primary" size="small" onClick={handleGenerateCoreOutline} loading={coreStatus.loading}>
+            {coreStatus.loading ? '生成中' : '生成核心大纲'}
+          </Button>
+        }
+      >
+        {/* Template Library - Moved to Top */}
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <Text bold>📚 模板库</Text>
+            <Button
+              type="secondary"
+              size="small"
+              icon={<IconSync />}
+              onClick={() => setGenTemplateVisible(true)}
+            >
+              AI 生成模板
+            </Button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
+            {outlineTemplates.map(template => (
+              <Card
+                key={template.id}
+                hoverable
+                size="small"
+                style={{ cursor: 'pointer', border: '1px solid var(--color-border-2)' }}
+                onClick={() => {
+                  formIdea.setFieldsValue({
+                    mainPlot: template.storyFields?.mainPlot || '',
+                    mainConflict: template.storyFields?.mainConflict || '',
+                    storyBeginning: template.storyFields?.storyBeginning || '',
+                    expectedEnding: template.storyFields?.expectedEnding || '',
+                    timePeriod: template.worldFields?.timePeriod || '',
+                    mainSettings: template.worldFields?.mainSettings || '',
+                    worldFeatures: template.worldFields?.worldFeatures || '',
+                    socialRules: template.worldFields?.socialRules || ''
+                  });
+                  setOutlineOptions(template.options);
+                  setCharacterPresets(template.characters || []);
+                  messageApi.success(`已应用模板: ${template.name}`);
+                }}
+              >
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: 24, marginBottom: 4 }}>{template.icon}</div>
+                  <Text bold style={{ display: 'block', marginBottom: 2 }}>{template.name}</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>{template.description}</Text>
+                </div>
+              </Card>
+            ))}
+          </div>
+        </div>
+        <Form form={formIdea} layout="vertical">
+          {/* Story Concept Section */}
+          <div style={{ marginBottom: 16 }}>
+            <Text bold style={{ display: 'block', marginBottom: 12 }}>📖 故事构思</Text>
+            <Row gutter={16}>
+              <Col span={24}>
+                <Form.Item field="mainPlot" label="故事主线">
+                  <Input.TextArea rows={2} placeholder="一句话概括：谁在什么情况下做什么事" />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item field="mainConflict" label="主要冲突">
+                  <Input placeholder="核心矛盾是什么" />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item field="storyBeginning" label="故事开端">
+                  <Input placeholder="故事如何开始" />
+                </Form.Item>
+              </Col>
+              <Col span={24}>
+                <Form.Item field="expectedEnding" label="预期结局（可选）">
+                  <Input placeholder="故事如何结束" />
+                </Form.Item>
+              </Col>
+            </Row>
+          </div>
+
+          {/* World Setting Section */}
+          <div style={{ marginBottom: 16 }}>
+            <Text bold style={{ display: 'block', marginBottom: 12 }}>🌍 世界设定</Text>
+            <Row gutter={16}>
+              <Col span={12}>
+                <Form.Item field="timePeriod" label="时代背景">
+                  <Input placeholder="如：现代都市、古代仙侠、未来科幻" />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item field="mainSettings" label="主要场景">
+                  <Input placeholder="如：校园、职场、修仙界" />
+                </Form.Item>
+              </Col>
+              <Col span={24}>
+                <Form.Item field="worldFeatures" label="世界特色">
+                  <Input.TextArea rows={2} placeholder="这个世界的独特设定（如：魔法体系、科技水平、特殊能力）" />
+                </Form.Item>
+              </Col>
+              <Col span={24}>
+                <Form.Item field="socialRules" label="社会规则（可选）">
+                  <Input placeholder="重要的社会规则或限制" />
+                </Form.Item>
+              </Col>
+            </Row>
+          </div>
+
+          {/* Character Presets Section */}
+          <div style={{ marginTop: 16, marginBottom: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <Text bold>👥 角色预设</Text>
+              <Button
+                type="primary"
+                size="small"
+                icon={<IconPlus />}
+                onClick={() => {
+                  setCharacterPresets([...characterPresets, { name: '', role: '', description: '' }]);
+                }}
+              >
+                添加角色
+              </Button>
+            </div>
+            {characterPresets.length > 0 ? (
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 12 }}>
+                {characterPresets.map((char, index) => (
+                  <Card key={index} size="small" style={{ border: '1px solid var(--color-border-2)' }}>
+                    <div style={{ display: 'grid', gap: 8 }}>
+                      <Row gutter={8}>
+                        <Col span={8}>
+                          <Input
+                            size="small"
+                            placeholder="角色名称"
+                            value={char.name}
+                            onChange={(val) => {
+                              const newPresets = [...characterPresets];
+                              newPresets[index].name = val;
+                              setCharacterPresets(newPresets);
+                            }}
+                          />
+                        </Col>
+                        <Col span={8}>
+                          <Input
+                            size="small"
+                            placeholder="角色定位"
+                            value={char.role}
+                            onChange={(val) => {
+                              const newPresets = [...characterPresets];
+                              newPresets[index].role = val;
+                              setCharacterPresets(newPresets);
+                            }}
+                          />
+                        </Col>
+                        <Col span={8}>
+                          <div style={{ display: 'flex', gap: 4 }}>
+                            <Input
+                              size="small"
+                              placeholder="简要描述"
+                              value={char.description}
+                              onChange={(val) => {
+                                const newPresets = [...characterPresets];
+                                newPresets[index].description = val;
+                                setCharacterPresets(newPresets);
+                              }}
+                              style={{ flex: 1 }}
+                            />
+                            <Button
+                              size="small"
+                              type="text"
+                              status="danger"
+                              icon={<IconDelete />}
+                              onClick={() => {
+                                const newPresets = characterPresets.filter((_, i) => i !== index);
+                                setCharacterPresets(newPresets);
+                              }}
+                            />
+                          </div>
+                        </Col>
+                      </Row>
+                    </div>
+                  </Card>
+                ))}
+              </div>
+            ) : (
+              <Text type="secondary" style={{ fontSize: 12 }}>暂无角色预设，点击"添加角色"或选择模板自动填充</Text>
+            )}
+          </div>
+
+          {/* Template Library */}
+
+
+          {/* Advanced Options */}
+          <Collapse style={{ marginTop: 16, marginBottom: 16 }}>
+            <Collapse.Item header={<Text bold>⚙️ 高级选项</Text>} name="advanced">
+              <div style={{ display: 'grid', gap: 16 }}>
+                <div>
+                  <Text bold style={{ display: 'block', marginBottom: 8 }}>小说类型</Text>
+                  <Space wrap>
+                    {['现代都市', '古代言情', '玄幻修仙', '科幻未来', '悬疑推理', '其他'].map(type => (
+                      <Button
+                        key={type}
+                        type={outlineOptions.novelType === type ? 'primary' : 'default'}
+                        size="small"
+                        onClick={() => setOutlineOptions(prev => ({ ...prev, novelType: type }))}
+                      >
+                        {type}
+                      </Button>
+                    ))}
+                  </Space>
+                </div>
+
+                <div>
+                  <Text bold style={{ display: 'block', marginBottom: 8 }}>目标受众</Text>
+                  <Space wrap>
+                    {['18-25岁', '25-35岁', '女性向', '男性向', '全年龄'].map(audience => (
+                      <Button
+                        key={audience}
+                        type={outlineOptions.targetAudience.includes(audience) ? 'primary' : 'default'}
+                        size="small"
+                        onClick={() => {
+                          setOutlineOptions(prev => ({
+                            ...prev,
+                            targetAudience: prev.targetAudience.includes(audience)
+                              ? prev.targetAudience.filter(a => a !== audience)
+                              : [...prev.targetAudience, audience]
+                          }));
+                        }}
+                      >
+                        {audience}
+                      </Button>
+                    ))}
+                  </Space>
+                </div>
+
+                <div>
+                  <Text bold style={{ display: 'block', marginBottom: 8 }}>故事基调</Text>
+                  <Space wrap>
+                    {['轻松幽默', '温馨治愈', '紧张刺激', '黑暗压抑', '史诗宏大'].map(tone => (
+                      <Button
+                        key={tone}
+                        type={outlineOptions.tone === tone ? 'primary' : 'default'}
+                        size="small"
+                        onClick={() => setOutlineOptions(prev => ({ ...prev, tone }))}
+                      >
+                        {tone}
+                      </Button>
+                    ))}
+                  </Space>
+                </div>
+
+                <Row gutter={16}>
+                  <Col span={12}>
+                    <Text bold style={{ display: 'block', marginBottom: 8 }}>预期篇幅</Text>
+                    <Space wrap>
+                      {[{ label: '短篇', value: 'short' }, { label: '中篇', value: 'medium' }, { label: '长篇', value: 'long' }].map(item => (
+                        <Button
+                          key={item.value}
+                          type={outlineOptions.length === item.value ? 'primary' : 'default'}
+                          size="small"
+                          onClick={() => setOutlineOptions(prev => ({ ...prev, length: item.value }))}
+                        >
+                          {item.label}
+                        </Button>
+                      ))}
+                    </Space>
+                  </Col>
+                  <Col span={12}>
+                    <Text bold style={{ display: 'block', marginBottom: 8 }}>CP设定</Text>
+                    <Space wrap>
+                      {['1v1', '三角恋', '多CP', '无CP'].map(cp => (
+                        <Button
+                          key={cp}
+                          type={outlineOptions.cpSetting === cp ? 'primary' : 'default'}
+                          size="small"
+                          onClick={() => setOutlineOptions(prev => ({ ...prev, cpSetting: cp }))}
+                        >
+                          {cp}
+                        </Button>
+                      ))}
+                    </Space>
+                  </Col>
+                </Row>
+
+                <div>
+                  <Text bold style={{ display: 'block', marginBottom: 8 }}>主要角色数量: {outlineOptions.characterCount}</Text>
+                  <input
+                    type="range"
+                    min="2"
+                    max="10"
+                    value={outlineOptions.characterCount}
+                    onChange={(e) => setOutlineOptions(prev => ({ ...prev, characterCount: parseInt(e.target.value) }))}
+                    style={{ width: '100%' }}
+                  />
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--color-text-3)' }}>
+                    <span>2人</span>
+                    <span>10人</span>
+                  </div>
+                </div>
+              </div>
+            </Collapse.Item>
+          </Collapse>
+        </Form>
+        <Space>
+          {coreStatus.loading ? (
+            <Button type="primary" status="danger" onClick={() => {
+              if (abortControllerRef.current) {
+                abortControllerRef.current.abort();
+                abortControllerRef.current = null;
+              }
+            }}>停止生成</Button>
+          ) : (
+            <Button type="primary" onClick={handleGenerateCoreOutline}>生成核心大纲</Button>
+          )}
+          {coreStatus.msg && !coreStatus.loading && <span style={{ color: 'var(--color-text-3)', fontSize: 12 }}>{coreStatus.msg}</span>}
+          <Button onClick={handleSaveCoreOutline} loading={coreStatus.loading}>保存</Button>
+          <Button icon={<IconUpload />} onClick={handleOpenImportOutline}>上传大纲</Button>
+          <Button icon={<IconDownload />} onClick={handleExportCoreOutline}>导出</Button>
+          <Popconfirm
+            title="确定要删除核心大纲吗？"
+            onOk={handleDeleteCoreOutline}
+            okText="删除"
+            cancelText="取消"
+            okButtonProps={{ status: 'danger' }}
+          >
+            <Button status="danger" icon={<IconDelete />}>删除</Button>
+          </Popconfirm>
+        </Space>
+        <div style={{ marginTop: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', marginBottom: 12 }}>
+            {editingModule !== null ? (
+              <Space>
+                <Button size="small" onClick={() => { setEditingModule(null); setModuleEditData({}); }}>取消</Button>
+                <Button size="small" type="primary" onClick={async () => {
+                  try {
+                    const updatedOutline = { ...outlineJSON, ...moduleEditData };
+                    const outlineText = JSON.stringify(updatedOutline, null, 2);
+                    await storageEx.updateCoreOutline(currentProject.id, {
+                      title: '核心大纲',
+                      content: outlineText
+                    });
+                    setCoreOutline(outlineText);
+                    setOutlineJSON(updatedOutline);
+                    setEditingModule(null);
+                    setModuleEditData({});
+                    messageApi.success('大纲已更新');
+                  } catch (err) {
+                    messageApi.error('保存失败');
+                  }
+                }}>保存</Button>
+              </Space>
+            ) : (
+              <Button size="small" type="secondary" icon={<IconEdit />} onClick={() => {
+                if (!outlineJSON) return;
+                setEditingModule('all');
+                setModuleEditData({
+                  title: outlineJSON.title || '',
+                  logline: outlineJSON.logline || '',
+                  theme: outlineJSON.theme || '',
+                  coreConflict: outlineJSON.coreConflict || '',
+                  tone: outlineJSON.tone || '',
+                  pacing: outlineJSON.pacing || '',
+                  targetAudience: outlineJSON.targetAudience || '',
+                  tags: outlineJSON.tags || [],
+                  worldSetting: outlineJSON.worldSetting || { description: outlineJSON.worldNotes || '', rules: '' },
+                  characterArcSummary: outlineJSON.characterArcSummary || { protagonist: '', antagonist: '' },
+                  plotProgression: outlineJSON.plotProgression ? [...outlineJSON.plotProgression] : [],
+                  ending: outlineJSON.ending || ''
+                });
+              }}>编辑</Button>
+            )}
+          </div>
+          {/* The following code block is assumed to be part of a loadData function or similar initialization logic */}
+          {/* The user's instruction implies this code should be inserted into a function that runs on component load or data refresh. */}
+          {/* Since the provided context is within JSX, and the instruction snippet contains `await` and `set` calls, */}
+          {/* it's placed here as a comment block to indicate its intended logical location, not direct JSX rendering. */}
+          {/* If this was meant to replace the '编辑' button, the syntax would be incorrect. */}
+          {/* Assuming the user wants to add this logic to a `loadData` function that is called elsewhere. */}
+          {/*
+          const outlineRow = await storageEx.getCoreOutline(currentProject.id);
+          if (outlineRow) {
+            setCoreOutline(outlineRow.content);
+            try {
+              const json = JSON.parse(outlineRow.content);
+              setOutlineJSON(json);
+              // Initialize editing state with current values
+              setModuleEditData({
+                title: json.title || '',
+                logline: json.logline || '',
+                theme: json.theme || '',
+                coreConflict: json.coreConflict || '',
+                tone: json.tone || '',
+                pacing: json.pacing || '',
+                targetAudience: json.targetAudience || '',
+                tags: json.tags || [],
+                worldSetting: json.worldSetting || { description: json.worldNotes || '', rules: '' },
+                // characterArcSummary: json.characterArcSummary || { protagonist: '', antagonist: '' }, // Removed
+                plotProgression: json.plotProgression ? [...json.plotProgression] : [],
+                ending: json.ending || ''
+              });
+            } catch (e) {
+              console.error('Failed to parse core outline:', e);
+            }
+          }
+
+          // Load characters for avatar display
+          const chars = await storage.getItemsByProject('characters', currentProject.id);
+          setCharacters(chars);
+
+          await refreshVolumes();
+          */}
+          {renderStructuredOutline()}
+        </div>
+      </Card >
+
+      <Card title="分卷管理" style={{ marginBottom: 24 }} body={{ style: { padding: screens.xs ? '12px' : '24px' } }}>
+
+        <div style={{ marginBottom: 16 }}>
+          <Space>
+            {volumeStatus.loading ? (
+              <Button type="primary" status="danger" onClick={() => {
+                if (abortControllerRef.current) {
+                  abortControllerRef.current.abort();
+                  abortControllerRef.current = null;
+                }
+              }}>停止生成</Button>
+            ) : (
+              <Button type="primary" onClick={handleOpenGenerateVolumes}>生成分卷</Button>
+            )}
+            {volumeStatus.msg && <span style={{ color: 'var(--color-text-3)', fontSize: 12 }}>{volumeStatus.msg}</span>}
+            <Button onClick={handleSelectAll}>全选</Button>
+            <Button onClick={handleInverseSelect}>反选</Button>
+            <Popconfirm
+              title="清理无主的章节大纲（被删除分卷遗留的记录）？"
+              onOk={async () => {
+                const vols = await storageEx.getVolumes(currentProject.id);
+                const volIds = new Set(vols.map(v => v.id));
+                const nodes = await storageEx.getItems('chapter_nodes', { projectId: currentProject.id });
+                for (const n of nodes) {
+                  if (!volIds.has(n.volumeId)) {
+                    await storage.deleteItem('chapter_nodes', n.id);
+                  }
+                }
+                await refreshVolumes();
+                messageApi.success('已清理无主章节大纲');
+              }}
+            >
+              <Button>清理</Button>
+            </Popconfirm>
+            <Popconfirm
+              title="确定删除选中的分卷及其章节吗？"
+              onOk={handleDeleteSelectedVolumes}
+            >
+              <Button
+                status="danger"
+                disabled={selectedVolumeIds.size === 0}
+              >
+                批量删除
+              </Button>
+            </Popconfirm>
+          </Space>
+        </div>
+        <List dataSource={volumes} render={(v) => (
+          <List.Item
+            key={v.id}
+            style={{ cursor: 'pointer', background: selectedVolumeId === v.id ? 'var(--color-fill-2)' : 'transparent' }}
+            onClick={() => handleSelectVolume(v.id)}
+            actions={[
+              <Tooltip key="edit" content="编辑">
+                <Button size="small" type="text" icon={<IconEdit />} onClick={(e) => { e.stopPropagation(); handleOpenEditVolume(v); }} />
+              </Tooltip>,
+              <Tooltip key="regen" content="重新生成">
+                <Button size="small" type="text" icon={<IconSync />} onClick={(e) => { e.stopPropagation(); handleOpenRegenerateVolume(v); }} />
+              </Tooltip>,
+              <Popconfirm key="del" title="确定删除此分卷吗？" onOk={() => { handleDeleteVolume(v.id); }}>
+                <Button size="small" type="text" status="danger" icon={<IconDelete />} onClick={(e) => e.stopPropagation()} />
+              </Popconfirm>
+            ]}
+          >
+            <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+              <Checkbox
+                checked={selectedVolumeIds.has(v.id)}
+                onChange={(val, e) => { e.stopPropagation(); toggleSelectVolume(v.id, val); }}
+                style={{ marginRight: 12, marginTop: 4 }}
+                onClick={(e) => e.stopPropagation()}
+              />
+              <List.Item.Meta
+                title={<Text bold>{`第${v.order}卷 ${v.name}`}</Text>}
+                description={v.description}
+              />
+            </div>
+          </List.Item>
+        )} />
+      </Card>
+
+      <Card title="分卷计划" style={{ marginBottom: 24 }} body={{ style: { padding: screens.xs ? '12px' : '24px' } }}>
+        {renderVolumePlan()}
+      </Card>
+
+
+
+
+
+      <Modal
+        title="编辑分卷"
+        visible={editVolumeVisible}
+        onCancel={() => setEditVolumeVisible(false)}
+        onOk={handleSaveEditVolume}
+      >
+        <Form form={formVolumeEdit} layout="vertical">
+          <Form.Item field="name" label="分卷名称" rules={[{ required: true }]}>
+            <Input />
+          </Form.Item>
+          <Form.Item field="description" label="分卷说明">
+            <Input.TextArea rows={4} />
+          </Form.Item>
+          <Form.Item field="order" label="顺序（数字）">
+            <Input />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="编辑核心大纲"
+        visible={editStructureVisible}
+        onCancel={() => setEditStructureVisible(false)}
+        onOk={handleSaveStructure}
+        style={{ width: 800 }}
+      >
+        <Form form={formStructure} layout="vertical">
+          <Form.Item field="title" label="标题">
+            <Input />
+          </Form.Item>
+          <Form.Item field="logline" label="一句话摘要">
+            <Input.TextArea rows={2} />
+          </Form.Item>
+          <Form.Item field="theme" label="主题">
+            <Input />
+          </Form.Item>
+          <Form.Item field="coreConflict" label="核心冲突">
+            <Input.TextArea rows={3} />
+          </Form.Item>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <Form.Item field="tone" label="基调">
+              <Input />
+            </Form.Item>
+            <Form.Item field="pacing" label="节奏">
+              <Input />
+            </Form.Item>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <Form.Item field="targetAudience" label="目标受众">
+              <Input />
+            </Form.Item>
+            <Form.Item field="tags" label="标签">
+              <InputTag />
+            </Form.Item>
+          </div>
+
+          <Typography.Title heading={6}>世界观设定</Typography.Title>
+          <Form.Item field="worldSettingDescription" label="描述">
+            <Input.TextArea rows={3} />
+          </Form.Item>
+          <Form.Item field="worldSettingRules" label="规则">
+            <Input.TextArea rows={3} />
+          </Form.Item>
+
+          <Typography.Title heading={6}>角色成长弧光</Typography.Title>
+          <Form.Item field="characterArcProtagonist" label="主角">
+            <Input.TextArea rows={2} />
+          </Form.Item>
+          <Form.Item field="characterArcAntagonist" label="反派">
+            <Input.TextArea rows={2} />
+          </Form.Item>
+
+          <Typography.Title heading={6}>详细列表</Typography.Title>
+          <Form.Item label="角色弧光列表 (旧)">
+            <Form.List field="characterArcs">
+              {(fields, { add, remove }) => (
+                <div>
+                  {fields.map((item, index) => (
+                    <div key={item.key || index} style={{ display: 'flex', marginBottom: 8 }}>
+                      <Form.Item field={item.field} noStyle>
+                        <Input placeholder={`角色弧光 ${index + 1}`} />
+                      </Form.Item>
+                      <Button icon={<IconDelete />} status="danger" onClick={() => remove(index)} style={{ marginLeft: 8 }} />
+                    </div>
+                  ))}
+                  <Button type="dashed" long onClick={() => add()} icon={<IconPlus />}>添加角色弧光</Button>
+                </div>
+              )}
+            </Form.List>
+          </Form.Item>
+          <Form.Item label="整体走向">
+            <Form.List field="plotProgression">
+              {(fields, { add, remove }) => (
+                <div>
+                  {fields.map((item, index) => (
+                    <div key={item.key || index} style={{ display: 'flex', marginBottom: 8 }}>
+                      <Form.Item field={item.field} noStyle>
+                        <Input placeholder={`阶段 ${index + 1}`} />
+                      </Form.Item>
+                      <Button icon={<IconDelete />} status="danger" onClick={() => remove(index)} style={{ marginLeft: 8 }} />
+                    </div>
+                  ))}
+                  <Button type="dashed" long onClick={() => add()} icon={<IconPlus />}>添加走向阶段</Button>
+                </div>
+              )}
+            </Form.List>
+          </Form.Item>
+          <Form.Item field="ending" label="预期结局">
+            <Input.TextArea rows={3} />
+          </Form.Item>
+          <Form.Item field="worldNotes" label="世界观补充">
+            <Input.TextArea rows={3} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="生成分卷设置"
+        visible={genVolumeVisible}
+        onCancel={() => setGenVolumeVisible(false)}
+        onOk={handleGenerateVolumes}
+        style={{ width: 700 }}
+      >
+        <Form form={formGenVolume} layout="vertical">
+          <Form.Item field="count" label="分卷数量" initialValue={1}>
+            <InputNumber min={1} max={20} onChange={val => setGenVolumeCount(val)} />
+          </Form.Item>
+
+          <div style={{ marginTop: 16, marginBottom: 8 }}>
+            <Text bold>分卷详细规划</Text>
+          </div>
+          <Collapse accordion defaultActiveKey={['0']}>
+            {Array.from({ length: genVolumeCount }).map((_, idx) => (
+              <Collapse.Item header={`第 ${idx + 1} 卷设置`} name={String(idx)} key={idx}>
+                <Form.Item
+                  field={`volume_${idx}_requirements`}
+                  label="本卷要求（可选）"
+                  help="输入本卷的关键角色、剧情走向、核心事件等"
+                >
+                  <Input.TextArea rows={4} placeholder="例如：主角在这一卷会遇到... 风格偏向悬疑..." />
+                </Form.Item>
+              </Collapse.Item>
+            ))}
+          </Collapse>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="生成章节设置"
+        visible={genChaptersVisible}
+        onCancel={() => setGenChaptersVisible(false)}
+        onOk={handleGenerateChapters}
+        style={{ width: 700 }}
+      >
+        <Form form={formGenChapters} layout="vertical" onValuesChange={(changed, values) => {
+          if (changed.totalChaptersInVolume) {
+            calculatePreviewChapters(changed.totalChaptersInVolume, genChaptersVolumeId);
+          }
+        }}>
+          <Form.Item field="totalChaptersInVolume" label="本卷计划章节数" initialValue={20} rules={[{ required: true }]}>
+            <InputNumber min={1} max={100} />
+          </Form.Item>
+          <div style={{ marginBottom: 16 }}>
+            <Text bold>{passionSystemName}</Text>
+            <div style={{ marginTop: 8, background: 'var(--color-fill-2)', padding: 16, borderRadius: 4 }}>
+              <div style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: 8,
+                justifyContent: 'flex-start'
+              }}>
+                {previewChapters.map(order => {
+                  // 动态计算每个柱状图的宽度，确保一行能显示所有章节
+                  const totalChapters = previewChapters.length;
+                  const minWidth = 40; // 最小宽度
+                  const maxWidth = 80; // 最大宽度
+                  const calculatedWidth = Math.max(minWidth, Math.min(maxWidth, (700 - (totalChapters * 8)) / totalChapters));
+
+                  return (
+                    <div key={order} style={{
+                      flex: `0 0 ${calculatedWidth}px`,
+                      minWidth: `${minWidth}px`,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      gap: 4
+                    }}>
+                      {/* 章节号在上方 */}
+                      <Text style={{ fontSize: 11, fontWeight: 'bold', color: 'var(--color-text-2)' }}>
+                        Ch.{order}
+                      </Text>
+
+                      {/* 可拖动的柱状图容器 */}
+                      <div
+                        style={{
+                          width: '100%',
+                          height: 100,
+                          background: 'var(--color-fill-3)',
+                          borderRadius: 4,
+                          position: 'relative',
+                          display: 'flex',
+                          alignItems: 'flex-end',
+                          cursor: 'ns-resize'
+                        }}
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          const container = e.currentTarget;
+                          const rect = container.getBoundingClientRect();
+
+                          const updateLevel = (clientY) => {
+                            const y = clientY - rect.top;
+                            const percentage = Math.max(0, Math.min(1, 1 - (y / rect.height)));
+                            const level = Math.max(1, Math.min(5, Math.round(percentage * 5)));
+                            setChapterPassionLevels(prev => ({
+                              ...prev,
+                              [order]: level
+                            }));
+                          };
+
+                          updateLevel(e.clientY);
+
+                          const handleMouseMove = (moveEvent) => {
+                            updateLevel(moveEvent.clientY);
+                          };
+
+                          const handleMouseUp = () => {
+                            document.removeEventListener('mousemove', handleMouseMove);
+                            document.removeEventListener('mouseup', handleMouseUp);
+                          };
+
+                          document.addEventListener('mousemove', handleMouseMove);
+                          document.addEventListener('mouseup', handleMouseUp);
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: '100%',
+                            height: `${(chapterPassionLevels[order] || 1) * 20}%`,
+                            background: `linear-gradient(to top, var(--color-primary-light-3), var(--color-primary-light-4))`,
+                            borderRadius: '0 0 4px 4px',
+                            transition: 'height 0.1s',
+                            pointerEvents: 'none'
+                          }}
+                        />
+                      </div>
+
+                      {/* 等级数字在下方 */}
+                      <Text style={{
+                        fontSize: 13,
+                        fontWeight: 'bold',
+                        color: 'var(--color-primary-6)'
+                      }}>
+                        Lv.{chapterPassionLevels[order] || 1}
+                      </Text>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>在柱状图上拖动鼠标调整等级</Text>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <Button size="mini" onClick={() => {
+                  setChapterPassionLevels(prev => {
+                    const next = { ...prev };
+                    previewChapters.forEach(order => {
+                      next[order] = 1;
+                    });
+                    return next;
+                  });
+                }}>全部重置</Button>
+                <Button size="mini" onClick={() => {
+                  setChapterPassionLevels(prev => {
+                    const next = { ...prev };
+                    const chapters = [...previewChapters];
+
+                    // 先随机分配基础等级
+                    chapters.forEach(order => {
+                      const rand = Math.random();
+                      if (rand < 0.7) {
+                        next[order] = 1;  // 70% 概率
+                      } else if (rand < 0.9) {
+                        next[order] = 2;  // 20% 概率
+                      } else {
+                        next[order] = 3;  // 10% 概率
+                      }
+                    });
+
+                    // 确保每3章至少有一章高于3级
+                    for (let i = 0; i < chapters.length; i += 3) {
+                      const group = chapters.slice(i, i + 3);
+                      const hasHighLevel = group.some(order => next[order] > 3);
+
+                      if (!hasHighLevel && group.length > 0) {
+                        // 随机选择组内一章设为4级或5级
+                        const randomIndex = Math.floor(Math.random() * group.length);
+                        const selectedOrder = group[randomIndex];
+                        next[selectedOrder] = Math.random() < 0.7 ? 4 : 5;  // 70% 4级, 30% 5级
+                      }
+                    }
+
+                    return next;
+                  });
+                }}>随机波动</Button>
+              </div>
+            </div>
+          </div>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="上传大纲（粘贴）"
+        visible={importOutlineVisible}
+        onCancel={handleCancelImportOutline}
+        onOk={handleConfirmImportOutline}
+        style={{ width: 800 }}
+      >
+        <Input.TextArea
+          rows={10}
+          value={importOutlineText}
+          onChange={setImportOutlineText}
+          placeholder="在此粘贴你的核心大纲文本或JSON。支持包含```json代码块的内容。"
+        />
+      </Modal>
+
+      <Modal
+        title={`重新生成分卷: ${regenTargetVolume?.name || ''}`}
+        visible={regenVolumeVisible}
+        onCancel={() => setRegenVolumeVisible(false)}
+        onOk={handleRegenerateVolume}
+      >
+        <div style={{ marginBottom: 16 }}>
+          <Text type="secondary">
+            重新生成将基于核心大纲、前一卷（如有）和后一卷（如有）的上下文。
+            <br />
+            原有的分卷描述将被覆盖，但已生成的章节不会被自动删除。
+          </Text>
+        </div>
+        <Form layout="vertical">
+          <Form.Item label="修改指导（可选）" help="输入具体的修改要求，例如：让冲突更激烈一点，或者改变结局走向">
+            <Input.TextArea
+              rows={4}
+              value={regenVolumeGuidance}
+              onChange={setRegenVolumeGuidance}
+              placeholder="例如：希望这一卷的结尾主角能够..."
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="发现未完成的章节生成任务"
+        visible={showResumeModal}
+        onOk={handleResumeGeneration}
+        onCancel={() => {
+          if (generationProgress) {
+            clearProgress(generationProgress.volumeId);
+          }
+          setShowResumeModal(false);
+          setGenerationProgress(null);
+        }}
+        okText="继续生成"
+        cancelText="取消任务"
+      >
+        <div style={{ padding: '12px 0' }}>
+          <p>检测到第 {generationProgress?.volumeId ? volumes.find(v => v.id === generationProgress.volumeId)?.order : '?'} 卷有未完成的章节生成任务。</p>
+          <p>上次进度: 已完成 {generationProgress?.completedChapters || 0} / {generationProgress?.totalChapters || '?'} 章</p>
+          <p style={{ marginTop: 12, color: 'var(--color-text-2)' }}>点击"继续生成"将从中断处继续，点击"取消任务"将清除进度记录。</p>
+        </div>
+      </Modal>
+      <Modal
+        title="AI 生成大纲模板"
+        visible={genTemplateVisible}
+        onOk={handleGenerateTemplate}
+        onCancel={() => setGenTemplateVisible(false)}
+        okText="开始生成"
+        confirmLoading={genTemplateLoading}
+      >
+        <Form layout="vertical">
+          <Form.Item label="您的想法 (例如：一个关于魔法学校的哈利波特风格故事)">
+            <Input.TextArea
+              rows={4}
+              value={genTemplateIdea}
+              onChange={val => setGenTemplateIdea(val)}
+              placeholder="请输入题材、风格或具体脑洞..."
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
+    </div >
+  );
+};

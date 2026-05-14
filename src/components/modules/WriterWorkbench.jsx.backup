@@ -1,0 +1,1287 @@
+import React, { useState, useEffect, useRef } from 'react';
+import {
+    Layout, Tree, Card, Button, Input, Space, Typography,
+    Empty, Message, Spin, Drawer, Tabs, List, Tag,
+    Slider, Select, Timeline, Collapse, InputNumber, Checkbox, Modal, ResizeBox
+} from '@arco-design/web-react';
+import {
+    IconEdit, IconSave, IconRobot, IconBook, IconUser,
+    IconSettings, IconMenu, IconRight, IconDown
+} from '@arco-design/web-react/icon';
+import { useProject } from '../../contexts/ProjectContext';
+import { storage, storageEx } from '../../services/storage';
+import { AgentCoordinator } from '../../services/AgentCoordinator';
+
+const { Sider, Content, Header } = Layout;
+const { Title, Text, Paragraph } = Typography;
+const { TextArea } = Input;
+
+const BatchGenerateModal = ({ visible, onCancel, onOk, volumes, chapterNodesMap }) => {
+    const [selectedKeys, setSelectedKeys] = useState([]);
+
+    // Flatten all chapters for easier access
+    const allChapters = volumes.flatMap(v =>
+        (chapterNodesMap[v.id] || []).sort((a, b) => a.order - b.order)
+    );
+
+    const handleSelectAll = (checked) => {
+        if (checked) {
+            setSelectedKeys(allChapters.map(c => c.id));
+        } else {
+            setSelectedKeys([]);
+        }
+    };
+
+    const handleVolumeSelect = (volId, checked) => {
+        const volChapters = chapterNodesMap[volId] || [];
+        const volChapterIds = volChapters.map(c => c.id);
+        if (checked) {
+            setSelectedKeys(prev => [...new Set([...prev, ...volChapterIds])]);
+        } else {
+            setSelectedKeys(prev => prev.filter(id => !volChapterIds.includes(id)));
+        }
+    };
+
+    return (
+        <Modal
+            title="批量生成章节"
+            visible={visible}
+            onOk={() => onOk(selectedKeys)}
+            onCancel={onCancel}
+            autoFocus={false}
+            focusLock={true}
+        >
+            <div style={{ marginBottom: 16 }}>
+                <Checkbox
+                    onChange={handleSelectAll}
+                    checked={selectedKeys.length === allChapters.length && allChapters.length > 0}
+                    indeterminate={selectedKeys.length > 0 && selectedKeys.length < allChapters.length}
+                >
+                    全选 ({selectedKeys.length}/{allChapters.length})
+                </Checkbox>
+            </div>
+            <div style={{ maxHeight: 400, overflow: 'auto' }}>
+                {volumes.map(vol => {
+                    const chapters = (chapterNodesMap[vol.id] || []).sort((a, b) => a.order - b.order);
+                    if (chapters.length === 0) return null;
+
+                    const volChapterIds = chapters.map(c => c.id);
+                    const selectedInVol = volChapterIds.filter(id => selectedKeys.includes(id));
+                    const allSelected = selectedInVol.length === chapters.length;
+                    const indeterminate = selectedInVol.length > 0 && !allSelected;
+
+                    return (
+                        <div key={vol.id} style={{ marginBottom: 16 }}>
+                            <div style={{ background: 'var(--color-fill-2)', padding: '4px 8px', marginBottom: 8 }}>
+                                <Checkbox
+                                    onChange={(checked) => handleVolumeSelect(vol.id, checked)}
+                                    checked={allSelected}
+                                    indeterminate={indeterminate}
+                                >
+                                    {vol.title}
+                                </Checkbox>
+                            </div>
+                            <div style={{ paddingLeft: 24, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                                {chapters.map(chapter => (
+                                    <Checkbox
+                                        key={chapter.id}
+                                        checked={selectedKeys.includes(chapter.id)}
+                                        onChange={(checked) => {
+                                            if (checked) setSelectedKeys(prev => [...prev, chapter.id]);
+                                            else setSelectedKeys(prev => prev.filter(id => id !== chapter.id));
+                                        }}
+                                    >
+                                        第 {chapter.order} 章：{chapter.title}
+                                    </Checkbox>
+                                ))}
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+        </Modal>
+    );
+};
+
+export const WriterWorkbench = ({ isVisible = true }) => {
+    const { currentProject } = useProject();
+    const [volumes, setVolumes] = useState([]);
+    const [chapterNodesMap, setChapterNodesMap] = useState({});
+    const [selectedChapterId, setSelectedChapterId] = useState(null);
+    const [selectedChapter, setSelectedChapter] = useState(null);
+    const [editorContent, setEditorContent] = useState('');
+    const [isGenerating, setIsGenerating] = useState(false);
+    const [generationStage, setGenerationStage] = useState('');
+    const [rightPanelVisible, setRightPanelVisible] = useState(true);
+    const [agentPanelVisible, setAgentPanelVisible] = useState(true);
+    const [targetLength, setTargetLength] = useState(4000);
+    const [characters, setCharacters] = useState([]);
+    const [deviation, setDeviation] = useState(null);
+    const [agentActivities, setAgentActivities] = useState([]);
+    const [draftText, setDraftText] = useState(''); // Store draft for comparison
+    const [characterUpdates, setCharacterUpdates] = useState([]);
+    const [batchModalVisible, setBatchModalVisible] = useState(false);
+    const [isBatchGenerating, setIsBatchGenerating] = useState(false);
+    const [batchQueue, setBatchQueue] = useState([]);
+    const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
+    const [currentBatchChapter, setCurrentBatchChapter] = useState(null);
+
+    // Column widths state with localStorage persistence
+    const [columnWidths, setColumnWidths] = useState(() => {
+        const saved = localStorage.getItem('writerWorkbenchColumnWidths');
+        return saved ? JSON.parse(saved) : {
+            sider: 250,
+            agentPanel: 300,
+            infoPanel: 400
+        };
+    });
+
+    // Save column widths to localStorage when they change
+    useEffect(() => {
+        localStorage.setItem('writerWorkbenchColumnWidths', JSON.stringify(columnWidths));
+    }, [columnWidths]);
+
+    const coordinatorRef = useRef(new AgentCoordinator());
+    const abortControllerRef = useRef(null);
+
+    const addActivity = (agent, action, details = '', extraData = null) => {
+        setAgentActivities(prev => [...prev, {
+            time: new Date().toLocaleTimeString(),
+            agent,
+            action,
+            details,
+            status: 'processing',
+            extraData // Store additional data like scenes, draft, etc.
+        }]);
+    };
+
+    const updateLastActivityStatus = (status) => {
+        setAgentActivities(prev => {
+            if (prev.length === 0) return prev;
+            const newActivities = [...prev];
+            newActivities[newActivities.length - 1].status = status;
+            return newActivities;
+        });
+    };
+
+    useEffect(() => {
+        if (currentProject && isVisible) {
+            loadData();
+        }
+    }, [currentProject, isVisible]);
+
+    useEffect(() => {
+        if (selectedChapterId) {
+            loadChapterContent(selectedChapterId);
+        } else {
+            setSelectedChapter(null);
+            setEditorContent('');
+        }
+    }, [selectedChapterId]);
+
+    // Auto-save when editorContent changes (with debounce)
+    useEffect(() => {
+        if (!selectedChapter || !editorContent) return;
+
+        const autoSaveTimer = setTimeout(() => {
+            console.log('[WriterWorkbench] Auto-saving due to content change, length:', editorContent.length);
+            handleSave();
+        }, 2000); // Save 2 seconds after user stops typing
+
+        return () => clearTimeout(autoSaveTimer);
+    }, [editorContent, selectedChapter]);
+
+    const loadData = async () => {
+        try {
+            const vols = await storageEx.getVolumes(currentProject.id);
+            setVolumes(vols.sort((a, b) => a.order - b.order));
+
+            const nodesMap = {};
+            for (const v of vols) {
+                const nodes = await storageEx.getChapterNodesByVolume(v.id);
+                nodesMap[v.id] = nodes.sort((a, b) => a.order - b.order);
+            }
+            setChapterNodesMap(nodesMap);
+
+            // Load characters
+            const chars = await storage.getItemsByProject('characters', currentProject.id);
+            setCharacters(chars);
+        } catch (error) {
+            console.error('[WriterWorkbench] Failed to load data:', error);
+            // Message.error('加载数据失败'); // Removed due to React 19 compatibility issue
+        }
+    };
+
+    const loadChapterContent = async (chapterId) => {
+        try {
+            console.log('[WriterWorkbench] loadChapterContent: Loading chapter', chapterId);
+            // Find the node
+            let node = null;
+            let volId = null;
+            for (const vid in chapterNodesMap) {
+                const found = chapterNodesMap[vid].find(n => n.id === chapterId);
+                if (found) {
+                    node = found;
+                    volId = vid;
+                    break;
+                }
+            }
+
+            if (node) {
+                console.log('[WriterWorkbench] loadChapterContent: Found node', node.id, 'content length:', (node.content || '').length);
+                setSelectedChapter({ ...node, volumeId: volId });
+                setEditorContent(node.content || '');
+                // Prioritize saved passionLevel, then infer from tension, else default to 1
+                // setPassionLevel(node.passionLevel || (node.tension ? Math.ceil(node.tension / 20) : 1));
+            } else {
+                console.warn('[WriterWorkbench] loadChapterContent: Node not found for chapter', chapterId);
+            }
+        } catch (error) {
+            console.error('[WriterWorkbench] loadChapterContent: Failed to load chapter:', error);
+        }
+    };
+
+    const handleSave = async () => {
+        if (!selectedChapter) {
+            console.warn('handleSave: No selected chapter');
+            return;
+        }
+        console.log('handleSave: Saving chapter', selectedChapter.id, 'with content length:', editorContent.length);
+        try {
+            await storage.updateItem('chapter_nodes', {
+                ...selectedChapter,
+                content: editorContent,
+                // passionLevel: passionLevel, // Save passion level
+                updatedAt: new Date().toISOString()
+            });
+            console.log('handleSave: Save successful');
+            // Message.success('保存成功'); // Removed due to React 19 compatibility issue
+
+            // Update local state
+            setChapterNodesMap(prev => {
+                const newMap = { ...prev };
+                const list = newMap[selectedChapter.volumeId];
+                const idx = list.findIndex(n => n.id === selectedChapter.id);
+                if (idx !== -1) {
+                    list[idx] = { ...list[idx], content: editorContent };
+                }
+                return newMap;
+            });
+        } catch (error) {
+            console.error('[WriterWorkbench] handleSave: Save failed', error);
+            // Message.error('保存失败: ' + error.message); // Removed due to React 19 compatibility issue
+        }
+    };
+
+    const selectedChapterIdRef = useRef(selectedChapterId);
+    useEffect(() => {
+        selectedChapterIdRef.current = selectedChapterId;
+    }, [selectedChapterId]);
+
+    const handleGenerate = async (arg) => {
+        // For batch generation, use targetChapterId; otherwise use selectedChapter
+        // If arg is an event (object) or not a string, treat it as null
+        const targetChapterId = typeof arg === 'string' ? arg : null;
+
+        const chapterToGenerate = targetChapterId
+            ? volumes.flatMap(v => chapterNodesMap[v.id] || []).find(c => c.id === targetChapterId)
+            : selectedChapter;
+
+        if (!chapterToGenerate) return;
+
+        // Track current batch chapter if in batch mode
+        if (targetChapterId) {
+            setCurrentBatchChapter(chapterToGenerate);
+        }
+
+        setIsGenerating(true);
+        setGenerationStage('准备中...');
+        setDeviation(null);
+        setAgentActivities([]);
+        setDraftText('');
+        setCharacterUpdates([]);
+
+        abortControllerRef.current = new AbortController();
+
+        try {
+            // Parse chapter outline to extract scenes
+            let scenes = null;
+            if (chapterToGenerate.summary) {
+                try {
+                    const parsed = JSON.parse(chapterToGenerate.summary);
+                    scenes = parsed.scenes || parsed; // Support both {scenes: [...]} and direct array
+                } catch (e) {
+                    console.warn('Failed to parse chapter summary as JSON, will generate new scenes', e);
+                }
+            }
+
+            const stream = coordinatorRef.current.executeChapterFlowStream(
+                currentProject.id,
+                chapterToGenerate.order,
+                {
+                    signal: abortControllerRef.current.signal,
+                    // passionLevel: passionLevel,
+                    length: targetLength, // Manual length control
+                    scenes: scenes // Pass the pre-generated scenes from outline
+                }
+            );
+
+            let currentText = '';
+            let finalStyledText = ''; // Track the final styled text for saving
+
+            for await (const event of stream) {
+                if (event.type === 'stage') {
+                    setGenerationStage(getStageLabel(event.stage));
+
+                    // Update previous activity to success if exists
+                    updateLastActivityStatus('success');
+
+                    // Add new activity based on stage with detailed info
+                    switch (event.stage) {
+                        case 'plan':
+                            const planData = event.data?.scenes || [];
+                            addActivity('Planner Agent', '正在规划场景结构...', '分析大纲与前文剧情', { scenes: planData });
+                            break;
+                        case 'writer':
+                            const scenesInfo = event.data?.scenesCount ? `共 ${event.data.scenesCount} 个场景` : '';
+                            addActivity('Writer Agent', '正在撰写初稿...', scenesInfo || '基于场景规划生成正文');
+                            break;
+                        case 'writerComplete':
+                            const wordCount = event.data?.wordCount ? `已生成 ${event.data.wordCount} 字` : '';
+                            addActivity('Writer Agent', '初稿完成', wordCount);
+                            break;
+                        case 'analysis':
+                            addActivity('Planner Agent', '正在分析初稿偏差...', '对比大纲与初稿内容');
+                            break;
+                        case 'analysisComplete':
+                            const deviationData = event.data?.deviation;
+                            const deviationCount = deviationData?.deviations?.length || 0;
+                            const strengthCount = deviationData?.strengths?.length || 0;
+                            const summary = `发现 ${deviationCount} 个偏差，${strengthCount} 个优点`;
+                            addActivity('Planner Agent', '偏差分析完成', summary, { deviation: deviationData });
+                            break;
+                        case 'stylist':
+                            const hasDeviation = event.data?.deviation ? '根据偏差分析进行针对性润色' : '优化文笔与修辞';
+                            addActivity('Stylist Agent', '正在润色文字...', hasDeviation);
+                            break;
+                        case 'stylistComplete':
+                            const finalInfo = event.data?.finalLength ? `最终 ${event.data.finalLength} 字` : '';
+                            addActivity('Stylist Agent', '润色完成', finalInfo);
+                            break;
+                        case 'updatingCharacters':
+                            addActivity('System', '更新角色状态...', '分析角色在本章的变化');
+                    }
+
+                    // Capture analysis data (now happens before styling)
+                    if (event.stage === 'analysisComplete' && event.data && event.data.deviation) {
+                        setDeviation(event.data.deviation);
+                    }
+                } else if (event.type === 'chunk') {
+                    // Capture draft text when writer completes
+                    if (event.stage === 'writer' && event.fullContent) {
+                        setDraftText(event.fullContent);
+                    }
+                    // We only show the final styled text as it comes in
+                    if (event.stage === 'stylist') {
+                        // For stylist, we append chunks.
+                        // Note: executeChapterFlowStream yields 'fullContent' which is easier to use
+                        if (event.fullContent) {
+                            console.log('[WriterWorkbench] Updating editorContent with stylist output, length:', event.fullContent.length);
+                            finalStyledText = event.fullContent; // Track for saving
+                            // Update local state only if this is the currently selected chapter (using Ref for freshness)
+                            if (chapterToGenerate.id === selectedChapterIdRef.current) {
+                                setEditorContent(finalStyledText);
+                            }
+                        }
+                    } else if (event.stage === 'writer') {
+                        setGenerationStage('正在撰写初稿...');
+                    }
+                } else if (event.type === 'critic') {
+                    // Handle Critic Agent feedback
+                    const critique = event.data;
+                    const score = critique?.summary?.overallVerdict === 'pass' ? '通过' : '需改进';
+                    const suggestionsCount = critique?.summary?.globalSuggestions?.length || 0;
+                    const issuesCount = (critique?.characterConsistency?.length || 0) +
+                        (critique?.logicCoherence?.length || 0) +
+                        (critique?.quality?.length || 0);
+
+                    addActivity('Critic Agent', '质量评审完成', `评审结果: ${score}，发现 ${issuesCount} 个问题，提出 ${suggestionsCount} 条建议`, { critique });
+                } else if (event.type === 'characterUpdate') {
+                    // Capture character updates
+                    if (event.data) {
+                        setCharacterUpdates(prev => [...prev, event.data]);
+                    }
+                }
+            }
+
+            updateLastActivityStatus('success');
+            addActivity('System', '生成任务完成', '所有 Agent 工作结束');
+            Message.success('生成完成');
+            console.log('[WriterWorkbench] Generation complete, finalStyledText length:', finalStyledText.length);
+
+            // Save the final styled text directly (don't rely on editorContent state)
+            if (!chapterToGenerate) { // Changed from selectedChapter to chapterToGenerate
+                console.warn('[WriterWorkbench] Cannot auto-save: no chapter to generate');
+            } else if (!finalStyledText || finalStyledText.length === 0) {
+                console.warn('[WriterWorkbench] Cannot auto-save: finalStyledText is empty');
+                Message.warning('生成的内容为空，无法保存');
+            } else {
+                try {
+                    console.log('[WriterWorkbench] Auto-saving chapter', chapterToGenerate.id, 'with finalStyledText length:', finalStyledText.length);
+                    // Auto-save final styled text
+                    await storage.updateItem('chapter_nodes', {
+                        ...chapterToGenerate,
+                        content: finalStyledText,
+                        // passionLevel: passionLevel,
+                        updatedAt: new Date().toISOString()
+                    });
+                    console.log('[WriterWorkbench] Auto-save successful');
+                    // Message.success('已自动保存'); // Removed due to React 19 compatibility issue
+
+                    // Update local state
+                    // Only update editor content if we are still viewing the generated chapter
+                    if (chapterToGenerate.id === selectedChapterIdRef.current) {
+                        setEditorContent(finalStyledText);
+                    }
+
+                    setChapterNodesMap(prev => {
+                        const newMap = { ...prev };
+                        const list = newMap[chapterToGenerate.volumeId];
+                        const idx = list.findIndex(n => n.id === chapterToGenerate.id);
+                        if (idx !== -1) {
+                            list[idx] = { ...list[idx], content: finalStyledText };
+                        }
+                        return newMap;
+                    });
+                } catch (error) {
+                    console.error('[WriterWorkbench] Auto-save failed:', error);
+                    // Message.error('自动保存失败: ' + error.message); // Removed due to React 19 compatibility issue
+                }
+            }
+        } catch (error) {
+            if (error.message === 'aborted') {
+                updateLastActivityStatus('warning');
+                addActivity('System', '任务已停止', '用户手动取消');
+                Message.info('已停止生成');
+            } else {
+                console.error(error);
+                updateLastActivityStatus('error');
+                addActivity('System', '任务出错', error.message);
+                // Message.error('生成出错: ' + error.message); // Removed due to React 19 compatibility issue
+            }
+        } finally {
+            setIsGenerating(false);
+            if (targetChapterId) {
+                setCurrentBatchChapter(null);
+            }
+            setGenerationStage('');
+            abortControllerRef.current = null;
+        }
+    };
+
+    const handleStop = () => {
+        if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
+        }
+        // Stop batch generation if active
+        if (isBatchGenerating) {
+            setIsBatchGenerating(false);
+            setBatchQueue([]);
+            Message.info('批量生成已停止');
+        }
+    };
+
+    const handleBatchStart = (selectedIds) => {
+        setBatchModalVisible(false);
+        if (selectedIds.length === 0) return;
+
+        // Sort selected IDs by chapter order
+        const allChapters = volumes.flatMap(v => chapterNodesMap[v.id] || []);
+        const sortedIds = selectedIds.sort((a, b) => {
+            const charA = allChapters.find(c => c.id === a);
+            const charB = allChapters.find(c => c.id === b);
+            return (charA?.order || 0) - (charB?.order || 0);
+        });
+
+        setBatchQueue(sortedIds);
+        setBatchProgress({ current: 0, total: sortedIds.length });
+        setIsBatchGenerating(true);
+    };
+
+    // Batch processing effect
+    // Batch processing effect - now generates in background without switching chapters
+    useEffect(() => {
+        if (!isBatchGenerating) return;
+        if (isGenerating) return; // Busy with current chapter
+
+        if (batchQueue.length === 0) {
+            setIsBatchGenerating(false);
+            Message.success('批量生成完成');
+            return;
+        }
+
+        const nextId = batchQueue[0];
+
+        // Remove from queue immediately to prevent double-trigger
+        setBatchQueue(prev => prev.slice(1));
+
+        // Generate chapter in background without switching UI
+        handleGenerate(nextId).then(() => {
+            setBatchProgress(prev => ({ ...prev, current: prev.current + 1 }));
+        }).catch(err => {
+            console.error('Batch generation error:', err);
+            // If aborted, stop batch
+            if (err.message === 'aborted' || err.name === 'AbortError') {
+                setIsBatchGenerating(false);
+                setBatchQueue([]);
+            }
+        });
+    }, [isBatchGenerating, batchQueue, isGenerating]);
+
+    const getStageLabel = (stage) => {
+        const map = {
+            'context': '分析上下文...',
+            'plan': '规划场景...',
+            'writer': '正在撰写...',
+            'writerComplete': '初稿完成，开始润色...',
+            'stylist': '正在润色...',
+            'stylistComplete': '润色完成',
+            'analysis': '分析偏差...',
+            'archived': '存档中...',
+            'updatingCharacters': '更新角色状态...',
+            'causality': '提取因果关系...'
+        };
+        return map[stage] || stage;
+    };
+
+    // Helper to parse scenes for right panel
+    const getScenes = () => {
+        if (!selectedChapter || !selectedChapter.summary) return [];
+        try {
+            const parsed = JSON.parse(selectedChapter.summary);
+            return parsed.scenes || [];
+        } catch {
+            return [];
+        }
+    };
+
+    // Passion Chart Component
+    const PassionChart = ({ volumeId, currentChapterId }) => {
+        const chapters = chapterNodesMap[volumeId] || [];
+        if (chapters.length === 0) return null;
+
+        const data = chapters.map(c => ({
+            id: c.id,
+            order: c.order,
+            level: c.passionLevel || (c.tension ? Math.ceil(c.tension / 20) : 1)
+        })).sort((a, b) => a.order - b.order);
+
+        const width = 360; // Responsive to 400px panel (minus padding)
+        const height = 80; // Increased height for better visibility
+        const padding = 10;
+
+        const minOrder = Math.min(...data.map(d => d.order));
+        const maxOrder = Math.max(...data.map(d => d.order));
+        const range = maxOrder - minOrder || 1;
+
+        const getX = (order) => {
+            if (data.length === 1) return width / 2;
+            return padding + ((order - minOrder) / range) * (width - 2 * padding);
+        };
+        const getY = (level) => height - padding - ((level - 1) / 4) * (height - 2 * padding);
+
+        const points = data.map(d => `${getX(d.order)},${getY(d.level)}`).join(' ');
+
+        return (
+            <div style={{ marginBottom: 16, padding: '8px 0' }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>本卷波动趋势</Text>
+                <svg width={width} height={height} style={{ overflow: 'visible', marginTop: 8 }}>
+                    {/* Grid lines - 5 levels */}
+                    {[1, 2, 3, 4, 5].map(l => (
+                        <line key={l} x1={padding} y1={getY(l)} x2={width - padding} y2={getY(l)} stroke="var(--color-border-2)" strokeDasharray="2,2" />
+                    ))}
+
+                    {/* Line */}
+                    <polyline points={points} fill="none" stroke="var(--color-arcoblue-6)" strokeWidth="2" />
+
+                    {/* Points */}
+                    {data.map(d => (
+                        <circle
+                            key={d.id}
+                            cx={getX(d.order)}
+                            cy={getY(d.level)}
+                            r={d.id === currentChapterId ? 5 : 3}
+                            fill={d.id === currentChapterId ? "var(--color-arcoblue-6)" : "var(--color-fill-3)"}
+                            stroke="var(--color-arcoblue-6)"
+                            strokeWidth="2"
+                        />
+                    ))}
+                </svg>
+            </div>
+        );
+    };
+
+    const getChapterSummary = () => {
+        if (!selectedChapter || !selectedChapter.summary) return '';
+        try {
+            const parsed = JSON.parse(selectedChapter.summary);
+            return parsed.chapterSummary || parsed.oneSentence || '';
+        } catch {
+            return selectedChapter.summary;
+        }
+    };
+
+    const renderTreeNodes = () => {
+        return volumes.map(v => ({
+            key: `vol-${v.id}`,
+            title: `第 ${v.order} 卷：${v.name}`,
+            children: (chapterNodesMap[v.id] || []).map(c => ({
+                key: c.id,
+                title: `第 ${c.order} 章：${c.title || '未命名'}`,
+                isLeaf: true
+            }))
+        }));
+    };
+
+    return (
+        <Layout style={{ height: '100vh', overflow: 'hidden' }}>
+            <ResizeBox.Split
+                direction="horizontal"
+                style={{ height: '100%', width: '100%' }}
+                panes={[
+                    { size: columnWidths.sider / window.innerWidth, min: '200px', max: '500px' },
+                    { min: '400px' }
+                ]}
+                onMoving={(sizes) => {
+                    const newWidth = Math.round(sizes[0] * window.innerWidth);
+                    setColumnWidths(prev => ({ ...prev, sider: newWidth }));
+                }}
+            >
+                {/* Left Sidebar */}
+                <div style={{
+                    height: '100%',
+                    background: 'var(--color-bg-2)',
+                    borderRight: '1px solid var(--color-border-2)',
+                    display: 'flex',
+                    flexDirection: 'column'
+                }}>
+                    <div style={{ padding: 16, borderBottom: '1px solid var(--color-border-2)' }}>
+                        <Title heading={6} style={{ margin: 0 }}>章节导航</Title>
+                    </div>
+                    <div style={{ overflow: 'auto', height: 'calc(100% - 60px)' }}>
+                        <Tree
+                            treeData={renderTreeNodes()}
+                            selectedKeys={[selectedChapterId]}
+                            onSelect={(keys) => {
+                                if (keys.length > 0 && !keys[0].startsWith('vol-')) {
+                                    setSelectedChapterId(keys[0]);
+                                }
+                            }}
+                            blockNode
+                        />
+                    </div>
+                </div>
+
+                {/* Main Content Area */}
+                <Content style={{ display: 'flex', flexDirection: 'column', background: 'var(--color-bg-1)' }}>
+                    <Header style={{ padding: '0 16px', height: 60, borderBottom: '1px solid var(--color-border-2)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'var(--color-bg-2)' }}>
+                        <Space>
+                            <Title heading={5} style={{ margin: 0 }}>
+                                {selectedChapter ? `第 ${selectedChapter.order} 章：${selectedChapter.title || ''}` : '写作台'}
+                            </Title>
+                            {isBatchGenerating && currentBatchChapter && (
+                                <Tag color="orange" style={{ fontSize: 12 }}>
+                                    正在生成: 第 {currentBatchChapter.order} 章
+                                </Tag>
+                            )}
+                            {isGenerating && (
+                                <Space size={4}>
+                                    <Spin size={14} />
+                                    <Text type="secondary" style={{ fontSize: 13 }}>{generationStage}</Text>
+                                </Space>
+                            )}
+                        </Space>
+                        <Space>
+                            {isBatchGenerating ? (
+                                <Space>
+                                    <Tag color="arcoblue" style={{ fontSize: 13, padding: '0 8px', height: 32, lineHeight: '32px' }}>
+                                        批量生成中: {batchProgress.current} / {batchProgress.total}
+                                    </Tag>
+                                    <Button status="danger" onClick={handleStop}>停止批量</Button>
+                                </Space>
+                            ) : isGenerating ? (
+                                <Button status="danger" onClick={handleStop}>停止生成</Button>
+                            ) : (
+                                <Space>
+                                    <Button type="primary" icon={<IconRobot />} onClick={handleGenerate} disabled={!selectedChapter}>AI 撰写</Button>
+                                    <Button icon={<IconMenu />} onClick={() => setBatchModalVisible(true)}>批量生成</Button>
+                                </Space>
+                            )}
+                            <Button icon={<IconSave />} onClick={handleSave} disabled={!selectedChapter}>保存</Button>
+                            <Button
+                                icon={agentPanelVisible ? <IconRobot /> : <IconRobot style={{ color: 'var(--color-text-4)' }} />}
+                                onClick={() => setAgentPanelVisible(!agentPanelVisible)}
+                                type={agentPanelVisible ? 'secondary' : 'default'}
+                                style={{ marginRight: 8 }}
+                            >
+                                Agent 状态
+                            </Button>
+                            <Button
+                                icon={rightPanelVisible ? <IconBook /> : <IconBook style={{ color: 'var(--color-text-4)' }} />}
+                                onClick={() => setRightPanelVisible(!rightPanelVisible)}
+                                type={rightPanelVisible ? 'secondary' : 'default'}
+                            >
+                                章节情报
+                            </Button>
+                        </Space>
+                    </Header>
+
+                    <ResizeBox.Split
+                        direction="horizontal"
+                        style={{ flex: 1, overflow: 'hidden' }}
+                        panes={[
+                            { min: '400px' },
+                            {
+                                size: ((agentPanelVisible ? columnWidths.agentPanel : 0) + (rightPanelVisible ? columnWidths.infoPanel : 0)) / window.innerWidth,
+                                min: '250px',
+                                max: '1200px'
+                            }
+                        ]}
+                        onMoving={(sizes) => {
+                            const totalRightWidth = Math.round(sizes[1] * window.innerWidth);
+                            // Distribute width proportionally between visible panels
+                            if (agentPanelVisible && rightPanelVisible) {
+                                const ratio = columnWidths.agentPanel / (columnWidths.agentPanel + columnWidths.infoPanel);
+                                setColumnWidths(prev => ({
+                                    ...prev,
+                                    agentPanel: Math.round(totalRightWidth * ratio),
+                                    infoPanel: Math.round(totalRightWidth * (1 - ratio))
+                                }));
+                            } else if (agentPanelVisible) {
+                                setColumnWidths(prev => ({ ...prev, agentPanel: totalRightWidth }));
+                            } else if (rightPanelVisible) {
+                                setColumnWidths(prev => ({ ...prev, infoPanel: totalRightWidth }));
+                            }
+                        }}
+                    >
+                        {/* Main Editor Area */}
+                        <div style={{ height: '100%', padding: 24, overflow: 'auto' }}>
+                            {selectedChapter ? (
+                                <TextArea
+                                    value={editorContent}
+                                    onChange={setEditorContent}
+                                    style={{
+                                        height: '100%',
+                                        minHeight: 500,
+                                        border: 'none',
+                                        background: 'transparent',
+                                        fontSize: 16,
+                                        lineHeight: 1.8,
+                                        resize: 'none',
+                                        outline: 'none'
+                                    }}
+                                    placeholder="在此处开始写作，或点击上方“AI 撰写”自动生成..."
+                                />
+                            ) : (
+                                <Empty description="请在左侧选择一个章节开始写作" style={{ marginTop: 100 }} />
+                        {/* Right Panels Container */}
+                            <div style={{ display: 'flex', height: '100%' }}>
+                                {agentActivities.map((activity, index) => (
+                                    <Timeline.Item
+                                        key={index}
+                                        dotColor={
+                                            activity.status === 'processing' ? 'var(--color-primary-6)' :
+                                                activity.status === 'success' ? 'var(--color-success-6)' :
+                                                    activity.status === 'warning' ? 'var(--color-warning-6)' :
+                                                        activity.status === 'error' ? 'var(--color-danger-6)' : 'var(--color-text-3)'
+                                        }
+                                        lineType="dashed"
+                                    >
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                <Text bold style={{ fontSize: 13 }}>{activity.agent}</Text>
+                                                <Text type="secondary" style={{ fontSize: 12 }}>{activity.time}</Text>
+                                            </div>
+                                            <Text style={{ fontSize: 12 }}>{activity.action}</Text>
+                                            {activity.details && (
+                                                <Text type="secondary" style={{ fontSize: 12 }}>{activity.details}</Text>
+                                            )}
+
+                                            {/* Expandable Details */}
+                                            {activity.extraData && (
+                                                <Collapse
+                                                    bordered={false}
+                                                    style={{ marginTop: 8, background: 'var(--color-fill-1)', borderRadius: 4 }}
+                                                >
+                                                    {/* Scene Planning Details */}
+                                                    {activity.extraData.scenes && activity.extraData.scenes.length > 0 && (
+                                                        <Collapse.Item header="🎬 场景详情" name="scenes">
+                                                            <List
+                                                                size="small"
+                                                                dataSource={activity.extraData.scenes}
+                                                                render={(scene, idx) => (
+                                                                    <List.Item key={idx} style={{ padding: '8px 0', fontSize: 12 }}>
+                                                                        <div style={{ width: '100%' }}>
+                                                                            <Text bold style={{ fontSize: 12 }}>场景 {idx + 1}</Text>
+                                                                            {scene.location && <div><Text type="secondary">📍</Text> {scene.location}</div>}
+                                                                            {scene.action && <div style={{ marginTop: 4 }}>{scene.action}</div>}
+                                                                            {scene.characters && scene.characters.length > 0 && (
+                                                                                <div style={{ marginTop: 4 }}>
+                                                                                    <Text type="secondary">👥 {scene.characters.join(', ')}</Text>
+                                                                                </div>
+                                                                            )}
+                                                                        </div>
+                                                                    </List.Item>
+                                                                )}
+                                                            />
+                                                        </Collapse.Item>
+                                                    )}
+
+                                                    {/* Draft Comparison */}
+                                                    {activity.agent === 'Stylist Agent' && draftText && (
+                                                        <Collapse.Item header="🔄 润色对比" name="draft">
+                                                            <Tabs size="small">
+                                                                <Tabs.TabPane key="draft" title="初稿">
+                                                                    <div style={{ maxHeight: 200, overflow: 'auto', fontSize: 12, lineHeight: 1.6, padding: 8, background: 'var(--color-fill-2)', borderRadius: 4 }}>
+                                                                        {draftText}
+                                                                    </div>
+                                                                </Tabs.TabPane>
+                                                                <Tabs.TabPane key="final" title="润色后">
+                                                                    <div style={{ maxHeight: 200, overflow: 'auto', fontSize: 12, lineHeight: 1.6, padding: 8, background: 'var(--color-fill-2)', borderRadius: 4 }}>
+                                                                        {editorContent}
+                                                                    </div>
+                                                                </Tabs.TabPane>
+                                                            </Tabs>
+                                                        </Collapse.Item>
+                                                    )}
+
+                                                    {/* Deviation Analysis Details */}
+                                                    {activity.extraData.deviation && (
+                                                        <Collapse.Item header="📊 偏差详情" name="deviation">
+                                                            <div style={{ fontSize: 12 }}>
+                                                                {/* Overall Assessment */}
+                                                                {activity.extraData.deviation.overallAssessment && (
+                                                                    <div style={{ marginBottom: 12, padding: 8, background: 'var(--color-fill-2)', borderRadius: 4 }}>
+                                                                        <Text bold>总体评价：</Text>
+                                                                        <Paragraph style={{ fontSize: 12, margin: '4px 0 0 0' }}>
+                                                                            {activity.extraData.deviation.overallAssessment}
+                                                                        </Paragraph>
+                                                                    </div>
+                                                                )}
+
+                                                                {/* Deviations */}
+                                                                {activity.extraData.deviation.deviations && activity.extraData.deviation.deviations.length > 0 && (
+                                                                    <div style={{ marginBottom: 12 }}>
+                                                                        <Text bold style={{ color: 'var(--color-danger-6)' }}>⚠️ 偏差问题：</Text>
+                                                                        <List
+                                                                            size="small"
+                                                                            split={false}
+                                                                            dataSource={activity.extraData.deviation.deviations}
+                                                                            render={(item, idx) => (
+                                                                                <List.Item key={idx} style={{ padding: '8px 0', fontSize: 12, flexDirection: 'column', alignItems: 'flex-start' }}>
+                                                                                    <div style={{ width: '100%', padding: 8, background: 'var(--color-danger-light-1)', borderRadius: 4, borderLeft: '3px solid var(--color-danger-6)' }}>
+                                                                                        <div style={{ fontWeight: 'bold', marginBottom: 4 }}>问题 {idx + 1}: {item.issue}</div>
+                                                                                        {item.location && <div style={{ color: 'var(--color-text-3)', marginBottom: 4 }}>位置: {item.location}</div>}
+                                                                                        {item.suggestion && (
+                                                                                            <div style={{ marginTop: 4, padding: 4, background: 'var(--color-success-light-1)', borderRadius: 4 }}>
+                                                                                                <Text bold style={{ fontSize: 11, color: 'var(--color-success-6)' }}>💡 建议: </Text>
+                                                                                                <span style={{ fontSize: 11 }}>{item.suggestion}</span>
+                                                                                            </div>
+                                                                                        )}
+                                                                                    </div>
+                                                                                </List.Item>
+                                                                            )}
+                                                                        />
+                                                                    </div>
+                                                                )}
+
+                                                                {/* Strengths */}
+                                                                {activity.extraData.deviation.strengths && activity.extraData.deviation.strengths.length > 0 && (
+                                                                    <div>
+                                                                        <Text bold style={{ color: 'var(--color-success-6)' }}>✅ 优点（保留）：</Text>
+                                                                        <List
+                                                                            size="small"
+                                                                            split={false}
+                                                                            dataSource={activity.extraData.deviation.strengths}
+                                                                            render={(item, idx) => (
+                                                                                <List.Item key={idx} style={{ padding: '4px 0', fontSize: 12 }}>
+                                                                                    <div style={{ padding: 6, background: 'var(--color-success-light-1)', borderRadius: 4, width: '100%' }}>
+                                                                                        • {item}
+                                                                                    </div>
+                                                                                </List.Item>
+                                                                            )}
+                                                                        />
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </Collapse.Item>
+                                                    )}
+
+
+                                                    {/* Critique Details */}
+                                                    {activity.extraData.critique && (
+                                                        <Collapse.Item header="📝 评审详情" name="critique">
+                                                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                                                {/* Summary */}
+                                                                <div style={{ padding: 8, background: 'var(--color-fill-2)', borderRadius: 4 }}>
+                                                                    <Text bold>总体评价: </Text>
+                                                                    <Tag color={activity.extraData.critique.summary?.overallVerdict === 'pass' ? 'green' : 'orange'}>
+                                                                        {activity.extraData.critique.summary?.overallVerdict === 'pass' ? '通过' : '需改进'}
+                                                                    </Tag>
+                                                                </div>
+
+                                                                {/* Global Suggestions */}
+                                                                {activity.extraData.critique.summary?.globalSuggestions?.length > 0 && (
+                                                                    <div>
+                                                                        <Text bold>💡 全局建议：</Text>
+                                                                        <List
+                                                                            size="small"
+                                                                            split={false}
+                                                                            dataSource={activity.extraData.critique.summary.globalSuggestions}
+                                                                            render={(item, idx) => (
+                                                                                <List.Item key={idx} style={{ padding: '4px 0', fontSize: 12 }}>• {item}</List.Item>
+                                                                            )}
+                                                                        />
+                                                                    </div>
+                                                                )}
+
+                                                                {/* Specific Issues */}
+                                                                {['characterConsistency', 'logicCoherence', 'quality'].map(cat => {
+                                                                    const issues = activity.extraData.critique[cat] || [];
+                                                                    if (issues.length === 0) return null;
+                                                                    const titleMap = { characterConsistency: '角色一致性', logicCoherence: '逻辑连贯性', quality: '写作质量' };
+                                                                    return (
+                                                                        <div key={cat}>
+                                                                            <Text bold>{titleMap[cat]}问题：</Text>
+                                                                            <List
+                                                                                size="small"
+                                                                                split={false}
+                                                                                dataSource={issues}
+                                                                                render={(item, idx) => (
+                                                                                    <List.Item key={idx} style={{ padding: '4px 0', fontSize: 12 }}>
+                                                                                        <div style={{ width: '100%', padding: 6, background: 'var(--color-warning-light-1)', borderRadius: 4 }}>
+                                                                                            <div><Tag size="small" color={item.severity === 'major' ? 'red' : 'orange'}>{item.severity}</Tag> {item.issue}</div>
+                                                                                            {item.suggestion && <div style={{ marginTop: 4, color: 'var(--color-text-3)' }}>建议: {item.suggestion}</div>}
+                                                                                        </div>
+                                                                                    </List.Item>
+                                                                                )}
+                                                                            />
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        </Collapse.Item>
+                                                    )}
+                                                </Collapse>
+                                            )}
+                                        </div>
+                                    </Timeline.Item>
+                                ))}
+                            </Timeline>
+                        </div>
+                                    )}
+
+                        {/* Empty state when no activities */}
+                        {agentActivities.length === 0 && <Empty description="暂无 Agent 活动" />}
+                    </div>
+                </div>
+                            )}
+
+                {/* Chapter Info Panel */}
+                {rightPanelVisible && (
+                    <div
+                        style={{
+                            width: columnWidths.infoPanel,
+                            borderLeft: '1px solid var(--color-border-2)',
+                            background: 'var(--color-bg-2)',
+                            display: 'flex',
+                            flexDirection: 'column'
+                        }}>
+                        {/* Header */}
+                        <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--color-border-2)', background: 'var(--color-bg-3)' }}>
+                            <Title heading={6} style={{ margin: 0 }}>章节情报</Title>
+                        </div>
+
+                        <div style={{ flex: 1, overflow: 'auto', padding: 20 }}>
+                            {/* Passion Trend Chart Card */}
+                            <Card
+                                size="small"
+                                title={<Text bold style={{ fontSize: 13 }}>⚙️ 生成设置</Text>}
+                                style={{ marginBottom: 16, background: 'var(--color-bg-1)' }}
+                                bordered={false}
+                            >
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                        <Text style={{ fontSize: 13, color: 'var(--color-text-2)' }}>目标字数</Text>
+                                        <InputNumber
+                                            mode="button"
+                                            value={targetLength}
+                                            onChange={setTargetLength}
+                                            style={{ width: 140 }}
+                                            step={100}
+                                            min={500}
+                                            max={10000}
+                                            suffix="字"
+                                        />
+                                    </div>
+                                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                        {[1000, 2000, 3000, 4000, 5000].map(len => (
+                                            <Button
+                                                key={len}
+                                                size="mini"
+                                                type={targetLength === len ? 'primary' : 'secondary'}
+                                                onClick={() => setTargetLength(len)}
+                                                style={{ flex: '0 0 auto', fontSize: 11 }}
+                                            >
+                                                {len}
+                                            </Button>
+                                        ))}
+                                    </div>
+                                </div>
+                            </Card>
+
+
+                            {/* Chapter Summary Card */}
+                            {getChapterSummary() && (
+                                <Card
+                                    size="small"
+                                    title={<Text bold style={{ fontSize: 13 }}>📝 章节摘要</Text>}
+                                    style={{ marginBottom: 16 }}
+                                    bordered={false}
+                                >
+                                    <Paragraph
+                                        style={{ margin: 0, fontSize: 14, lineHeight: '1.6', color: 'var(--color-text-2)' }}
+                                        ellipsis={{ rows: 8, expandable: true, symbol: '展开' }}
+                                    >
+                                        {getChapterSummary()}
+                                    </Paragraph>
+                                </Card>
+                            )}
+
+                            {/* Appearing Characters */}
+                            {(() => {
+                                const scenes = getScenes();
+                                const uniqueCharNames = [...new Set(scenes.flatMap(s => s.characters || []))];
+                                if (uniqueCharNames.length === 0) return null;
+
+                                return (
+                                    <Card
+                                        size="small"
+                                        title={<Text bold style={{ fontSize: 13 }}>👥 出场角色</Text>}
+                                        style={{ marginBottom: 16 }}
+                                        bordered={false}
+                                    >
+                                        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                                            {uniqueCharNames.map((charName, idx) => {
+                                                const char = characters.find(c => c.name === charName);
+                                                return (
+                                                    <div key={idx} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, width: 56 }}>
+                                                        <div style={{
+                                                            width: 48,
+                                                            height: 48,
+                                                            borderRadius: '50%',
+                                                            overflow: 'hidden',
+                                                            background: char?.avatar ? 'transparent' : 'linear-gradient(135deg, var(--color-fill-3) 0%, var(--color-bg-3) 100%)',
+                                                            border: '1px solid var(--color-border-2)',
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            justifyContent: 'center',
+                                                            flexShrink: 0,
+                                                            boxShadow: '0 2px 4px rgba(0,0,0,0.05)'
+                                                        }}>
+                                                            {char?.avatar ? (
+                                                                <img
+                                                                    src={char.avatar}
+                                                                    alt={charName}
+                                                                    style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                                                                />
+                                                            ) : (
+                                                                <span style={{ fontSize: 16, fontWeight: 'bold', color: 'var(--color-text-4)' }}>
+                                                                    {charName?.[0] || '?'}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        <Text style={{ fontSize: 11, color: 'var(--color-text-2)', textAlign: 'center', lineHeight: 1.2 }} ellipsis={{ rows: 1 }}>
+                                                            {charName}
+                                                        </Text>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </Card>
+                                );
+                            })()}
+
+                            {/* Analysis Deviation Card moved to Agent Panel */}
+
+                            {/* Chapter Causality Card */}
+                            <Card
+                                size="small"
+                                title={<Text bold style={{ fontSize: 13 }}>🔗 剧情因果</Text>}
+                                style={{ marginBottom: 16 }}
+                                bordered={false}
+                            >
+                                {selectedChapter ? (
+                                    <div style={{ fontSize: 13 }}>
+                                        <div style={{ marginBottom: 12 }}>
+                                            <Text type="secondary" style={{ fontSize: 12 }}>本章目标</Text>
+                                            <Paragraph style={{ margin: '4px 0 0 0' }} editable={{
+                                                onChange: async (val) => {
+                                                    const updated = { ...selectedChapter, chapterGoal: val };
+                                                    setSelectedChapter(updated);
+                                                    await storage.updateItem('chapter_nodes', { ...updated, updatedAt: new Date().toISOString() });
+                                                    // Update map
+                                                    setChapterNodesMap(prev => {
+                                                        const newMap = { ...prev };
+                                                        const list = newMap[updated.volumeId];
+                                                        const idx = list.findIndex(n => n.id === updated.id);
+                                                        if (idx !== -1) list[idx] = updated;
+                                                        return newMap;
+                                                    });
+                                                }
+                                            }}>
+                                                {selectedChapter.chapterGoal || '点击添加目标...'}
+                                            </Paragraph>
+                                        </div>
+
+                                        <div style={{ marginBottom: 12 }}>
+                                            <Text type="secondary" style={{ fontSize: 12 }}>本章结果</Text>
+                                            <Paragraph style={{ margin: '4px 0 0 0' }} editable={{
+                                                onChange: async (val) => {
+                                                    const updated = { ...selectedChapter, chapterOutcome: val };
+                                                    setSelectedChapter(updated);
+                                                    await storage.updateItem('chapter_nodes', { ...updated, updatedAt: new Date().toISOString() });
+                                                    setChapterNodesMap(prev => {
+                                                        const newMap = { ...prev };
+                                                        const list = newMap[updated.volumeId];
+                                                        const idx = list.findIndex(n => n.id === updated.id);
+                                                        if (idx !== -1) list[idx] = updated;
+                                                        return newMap;
+                                                    });
+                                                }
+                                            }}>
+                                                {selectedChapter.chapterOutcome || '点击添加结果...'}
+                                            </Paragraph>
+                                        </div>
+
+                                        <div style={{ marginBottom: 12 }}>
+                                            <Text type="secondary" style={{ fontSize: 12 }}>遗留悬念</Text>
+                                            {selectedChapter.openQuestions && selectedChapter.openQuestions.length > 0 ? (
+                                                <List
+                                                    size="small"
+                                                    split={false}
+                                                    dataSource={selectedChapter.openQuestions}
+                                                    render={(item, idx) => (
+                                                        <List.Item key={idx} style={{ padding: '4px 0', fontSize: 12 }}>
+                                                            <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+                                                                <span style={{ marginRight: 6, color: 'var(--color-warning-6)' }}>❓</span>
+                                                                <span>{item}</span>
+                                                            </div>
+                                                        </List.Item>
+                                                    )}
+                                                />
+                                            ) : (
+                                                <div style={{ color: 'var(--color-text-3)', fontStyle: 'italic', marginTop: 4 }}>无遗留悬念</div>
+                                            )}
+                                        </div>
+
+                                        <div>
+                                            <Text type="secondary" style={{ fontSize: 12 }}>已解决</Text>
+                                            {selectedChapter.resolvedQuestions && selectedChapter.resolvedQuestions.length > 0 ? (
+                                                <List
+                                                    size="small"
+                                                    split={false}
+                                                    dataSource={selectedChapter.resolvedQuestions}
+                                                    render={(item, idx) => (
+                                                        <List.Item key={idx} style={{ padding: '4px 0', fontSize: 12 }}>
+                                                            <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+                                                                <span style={{ marginRight: 6, color: 'var(--color-success-6)' }}>✅</span>
+                                                                <span style={{ textDecoration: 'line-through', color: 'var(--color-text-3)' }}>{item}</span>
+                                                            </div>
+                                                        </List.Item>
+                                                    )}
+                                                />
+                                            ) : (
+                                                <div style={{ color: 'var(--color-text-3)', fontStyle: 'italic', marginTop: 4 }}>无解决问题</div>
+                                            )}
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <Empty description="请选择章节" />
+                                )}
+                            </Card>
+
+
+                            {/* Scene Blueprint Card */}
+                            <Card
+                                size="small"
+                                title={<Text bold style={{ fontSize: 13 }}>🎬 场景蓝图</Text>}
+                                bordered={false}
+                            >
+                                {selectedChapter ? (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                                        {getScenes().map((item, index) => (
+                                            <div
+                                                key={index}
+                                                style={{
+                                                    padding: 12,
+                                                    background: 'var(--color-fill-1)',
+                                                    borderRadius: 8,
+                                                    borderLeft: '3px solid var(--color-arcoblue-6)'
+                                                }}
+                                            >
+                                                <div style={{ marginBottom: 8 }}>
+                                                    <Text bold style={{ fontSize: 14 }}>
+                                                        场景 {index + 1}：📍 {item.location || '未知地点'}
+                                                    </Text>
+                                                </div>
+                                                <Paragraph
+                                                    style={{
+                                                        margin: 0,
+                                                        fontSize: 13,
+                                                        color: 'var(--color-text-2)',
+                                                        marginBottom: 8,
+                                                        lineHeight: '1.5'
+                                                    }}
+                                                >
+                                                    {item.action}
+                                                </Paragraph>
+                                                {item.characters && item.characters.length > 0 && (
+                                                    <Space wrap size={4}>
+                                                        {item.characters.map(c => (
+                                                            <Tag
+                                                                key={c}
+                                                                size="small"
+                                                                color="arcoblue"
+                                                                style={{ fontSize: 12 }}
+                                                            >
+                                                                {c}
+                                                            </Tag>
+                                                        ))}
+                                                    </Space>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <Empty description="请选择章节" style={{ padding: '20px 0' }} />
+                                )}
+                            </Card>
+                        </div>
+                    </div>
+                )}
+            </div>
+        </ResizeBox.Split>
+                </Content >
+
+    <BatchGenerateModal
+        visible={batchModalVisible}
+        onCancel={() => setBatchModalVisible(false)}
+        onOk={handleBatchStart}
+        volumes={volumes}
+        chapterNodesMap={chapterNodesMap}
+    />
+            </ResizeBox.Split >
+        </Layout >
+    );
+};
