@@ -31,6 +31,8 @@ export const DEFAULT_PROMPTS = {
 ## 剧情承接
 {{causalityContext}}
 
+{{antiRepetitionContext}}
+
 ## 世界观与约束
 {{constraints}}
 
@@ -48,11 +50,13 @@ export const DEFAULT_PROMPTS = {
 2. **符合整体基调**: 确保本章风格与故事核心基调一致。
 3. **角色一致性**: 角色行为必须符合其当前状态和前文发展。
 4. **剧情连贯**: 与前文关键事件保持连贯，避免矛盾。
-5. **波动等级**: Level {{passionLevel}}/5。
+5. **避免章节同质化**: 本章必须有明确的新信息、新行动或新关系变化；不要复用最近章节的开篇方式、冲突顺序、对话推进套路、相同地点下的相同情绪节拍。
+6. **因果推进**: 每个主要场景都要让人物处境发生变化，结尾状态必须不同于开头状态；不要只重复确认既有矛盾。
+7. **波动等级**: Level {{passionLevel}}/5。
 {{passionScaleDefinition}}
    - **本章核心要求**: {{passionGuidance}}
-6. **沉浸感**: 多用"展示而非讲述" (Show, Don't Tell) 的手法。
-7. **长度控制**: 
+8. **沉浸感**: 多用"展示而非讲述" (Show, Don't Tell) 的手法。
+9. **长度控制**:
    - **参考字数**: {{length}} 字
    - **写作策略**: 充分展开每个场景的描写，不要匆忙收尾
 
@@ -71,6 +75,7 @@ export const DEFAULT_PROMPTS = {
       { name: 'characterContext', description: '本章出场角色信息', example: '角色名、性格、当前状态' },
       { name: 'memoryContext', description: '剧情记忆库上下文', example: '未解决的悬念、重要伏笔、全局线索、角色关系演变、最近章节回顾' },
       { name: 'causalityContext', description: '因果关系上下文', example: '上一章遗留问题、本章目标、下一章预告' },
+      { name: 'antiRepetitionContext', description: '最近章节结构与剧情重复规避上下文', example: '最近章节目标、结果、场景节拍、开篇方式' },
       { name: 'constraints', description: '创作约束', example: '世界观规则、禁忌内容' },
       { name: 'previousChapterSummary', description: '上一章概要', example: '上一章的主要剧情' },
       { name: 'plan', description: '场景大纲', example: 'JSON 格式的场景列表' },
@@ -183,7 +188,10 @@ export const DEFAULT_PROMPTS = {
     system: `你是一位专家级的小说策划师。请根据提供的上下文为特定章节创建详细的场景列表。
 **绝对禁止**幻觉：不要生成大纲中没有的科幻/奇幻元素（除非大纲明确设定）。
 场景必须围绕本章梗概展开，落实到具体的地点和动作。
+如果提供了本章梗概，必须优先落实本章梗概；不要只根据分卷信息泛化推断。
 不预设场景数量，由你根据剧情需要自行决定。
+必须对照 PreviousContext 规避重复：不要连续复用相同开篇方式、冲突组合、信息揭示顺序或“目标受阻→争执→临时缓和”的固定结构。
+每个场景都要有新的信息增量、关系变化或处境变化。
 
 输出格式 (JSON):
 {

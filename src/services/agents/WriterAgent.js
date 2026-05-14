@@ -22,6 +22,7 @@ export class WriterAgent extends BaseAgent {
     const previousEvents = context.previousEvents || [];
     const plotMemory = context.plotMemory || null;
     const causalityContext = context.causalityContext || '';
+    const antiRepetitionContext = context.antiRepetitionContext || '';
 
     // Build Core Outline Context
     let outlineContext = '';
@@ -193,6 +194,7 @@ ${context.currentText}
       characterContext,
       memoryContext,
       causalityContext,
+      antiRepetitionContext,
       constraints: constraints || '无特殊约束',
       previousChapterSummary: previousChapterSummary || '无',
       plan: Array.isArray(plan) ? `## 场景清单 (必须严格遵循)

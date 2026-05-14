@@ -64,18 +64,18 @@ export class AgentCoordinator {
     const signal = options.signal;
     const taskId = uuidv4(); // Generate unique Task ID for this session
     const taskName = `章节生成 (第${chapterNumber}章)`; // Task Name
-    const project = await storage.getProject(projectId);
     const constraintsRows = await storageEx.getItems('constraints', { projectId });
     const constraints = constraintsRows.map(x => x.content).join('\n');
     const outlineRow = await storageEx.getCoreOutline(projectId);
     const outline = outlineRow ? outlineRow.content : '';
     const pre = await this.archivist.extractPreInfo({ projectId, chapterNodeId: null });
+    const allChapterNodes = await storageEx.getItems('chapter_nodes', { projectId });
+    const targetChapterNode = allChapterNodes.find(n => n.order === chapterNumber);
 
     // 0. Pre-update Character States (if not first chapter)
     if (chapterNumber > 1) {
       try {
-        const nodes = await storageEx.getItems('chapter_nodes', { projectId });
-        const prevNode = nodes.find(n => n.order === chapterNumber - 1);
+        const prevNode = allChapterNodes.find(n => n.order === chapterNumber - 1);
 
         if (prevNode && prevNode.content) {
           yield { type: 'stage', stage: 'updatingCharacters', data: { preUpdate: true } };
@@ -93,14 +93,9 @@ export class AgentCoordinator {
     let previousChapterSummary = '';
     if (chapterNumber > 1) {
       try {
-        const nodes = await storageEx.getItems('chapter_nodes', { projectId });
-        const prevNode = nodes.find(n => n.order === chapterNumber - 1);
+        const prevNode = allChapterNodes.find(n => n.order === chapterNumber - 1);
         if (prevNode) {
-          try {
-            const s = JSON.parse(prevNode.summary);
-            // Prioritize detailed scenes or full summary over one-line summary for immediate context
-            previousChapterSummary = (s.scenes ? JSON.stringify(s.scenes) : null) || s.summary || s.oneSentence || prevNode.summary;
-          } catch { previousChapterSummary = prevNode.summary; }
+          previousChapterSummary = this.formatChapterForContext(prevNode, { includeScenes: true, includeCausality: true });
         }
       } catch (err) { console.warn('Failed to fetch previous chapter summary', err); }
     }
@@ -113,25 +108,34 @@ export class AgentCoordinator {
     let scenes = options.scenes;
     if (!scenes) {
       // Gather enhanced context for scene generation
-      const previousChaptersSummary = await this.getPreviousChaptersSummary(projectId, chapterNumber, 3);
-      const nextChapterSummary = await this.getNextChapterSummary(projectId, chapterNumber);
+      const previousChaptersSummary = this.getPreviousChaptersSummary(allChapterNodes, chapterNumber, 5);
+      const nextChapterSummary = this.getNextChapterSummary(allChapterNodes, chapterNumber);
+      const chapterSummary = targetChapterNode
+        ? this.formatChapterForContext(targetChapterNode, { includeScenes: false, includeCausality: true })
+        : '';
 
       // Calculate volume progress
-      let volumeId = null;
+      let currentVolume = null;
       try {
         const vols = await storageEx.getItems('volumes', { projectId });
         const match = vols.find(v => typeof v.startChapter === 'number' && typeof v.endChapter === 'number' && chapterNumber >= v.startChapter && chapterNumber <= v.endChapter);
-        volumeId = match ? match.id : null;
-      } catch { }
-      const volumeProgress = await this.calculateVolumeProgress(projectId, chapterNumber, volumeId);
+        currentVolume = match || null;
+      } catch (err) {
+        console.warn('Failed to resolve current volume:', err);
+      }
+      const volumeProgress = this.calculateVolumeProgress(chapterNumber, currentVolume);
 
       // Get character states
       const characterStates = this.getCharacterStatesForChapter(characters, chapterNumber);
 
       scenes = await this.planner.generateChapterScenes({
-        volumeTheme: '',
+        volumeTheme: currentVolume
+          ? `第${currentVolume.order || '?'}卷：${currentVolume.name || ''}\n${currentVolume.description || ''}\n本卷目标：${currentVolume.mainGoal || ''}\n关键事件：${Array.isArray(currentVolume.keyEvents) ? currentVolume.keyEvents.join('；') : (currentVolume.keyEvents || '')}`
+          : '',
         chapterOrder: chapterNumber,
         constraints,
+        chapterSummary,
+        coreOutline: outline,
         characters, // Pass characters to scene generation too if generating from scratch
         projectId,
         // Enhanced Context
@@ -141,7 +145,9 @@ export class AgentCoordinator {
         characterStates,
         taskId, // Pass taskId to planner
         taskName, // Pass taskName to planner
-        chapterNumber // Pass chapter number for logging
+        chapterNumber, // Pass chapter number for logging
+        targetLength: options.length || 2000,
+        signal
       });
 
       if (signal && signal.aborted) throw new Error('aborted');
@@ -157,10 +163,8 @@ export class AgentCoordinator {
       yield { type: 'stage', stage: 'planComplete', data: { scenes } };
     }
 
-    const writer = new WriterAgent();
     const stylist = new StylistAgent();
-    const nodes = await storageEx.getItems('chapter_nodes', { projectId });
-    const nodeForOrder = nodes.find(n => n.order === chapterNumber);
+    const nodeForOrder = targetChapterNode;
 
     // Determine Passion Level
     let passionLevel = options.passionLevel || 1;
@@ -194,8 +198,8 @@ export class AgentCoordinator {
     }
 
     // 2. Calculate chapter position
-    const allChapters = await storageEx.getItems('chapter_nodes', { projectId });
-    const totalChapters = allChapters.length;
+    const allChapters = allChapterNodes;
+    const totalChapters = Math.max(allChapters.length, chapterNumber);
     const chapterPosition = {
       current: chapterNumber,
       total: totalChapters
@@ -205,7 +209,7 @@ export class AgentCoordinator {
     const previousEvents = await this.archivist.getPreviousKeyEvents({
       projectId,
       currentChapter: chapterNumber,
-      count: 3
+      count: 5
     });
 
     // 4. Filter to only appearing characters
@@ -219,6 +223,8 @@ export class AgentCoordinator {
       plotMemory = await this.plotMemory.buildMemoryContext(projectId, chapterNumber);
       yield { type: 'stage', stage: 'memoryComplete', data: { plotMemory } };
     }
+
+    const antiRepetitionContext = this.buildAntiRepetitionContext(allChapters, chapterNumber, 5);
 
     // 6. Build Causality Context
     let causalityContext = '';
@@ -271,10 +277,11 @@ export class AgentCoordinator {
         passionLevel,
         passionDefinitions,
         coreOutline,
-        chapterPosition: { current: chapterNumber, total: totalChapters },
-        previousEvents: plotMemory ? plotMemory.events : [],
+        chapterPosition,
+        previousEvents,
         plotMemory,
         causalityContext,
+        antiRepetitionContext,
         mode: options.mode || 'full',
         currentText: options.currentText || '',
         taskId,
@@ -314,10 +321,11 @@ export class AgentCoordinator {
         passionLevel,
         passionDefinitions,
         coreOutline,
-        chapterPosition: { current: chapterNumber, total: totalChapters },
-        previousEvents: plotMemory ? plotMemory.events : [],
+        chapterPosition,
+        previousEvents,
         plotMemory,
         causalityContext,
+        antiRepetitionContext,
         mode: options.mode || 'full',
         currentText: options.currentText || '',
         taskId,
@@ -441,14 +449,6 @@ export class AgentCoordinator {
     }
 
     yield { type: 'stage', stage: 'complete', data: { finalLength: styledText.length } };
-    // Map chapter to volumeId based on planned ranges
-    let volumeId = null;
-    try {
-      const vols = await storageEx.getItems('volumes', { projectId });
-      const match = vols.find(v => typeof v.startChapter === 'number' && typeof v.endChapter === 'number' && chapterNumber >= v.startChapter && chapterNumber <= v.endChapter);
-      volumeId = match ? match.id : null;
-    } catch { }
-
     // Legacy 'chapters' table removed
     // await storage.addItem('chapters', chapter);
     // yield { type: 'saved', chapter };
@@ -621,6 +621,133 @@ ${characters.map(c => c.name).join(', ')}`;
     }
   }
 
+  parseChapterSummary(summary) {
+    if (!summary) return {};
+    if (typeof summary === 'object') return summary;
+
+    try {
+      return JSON.parse(summary);
+    } catch {
+      return { summary };
+    }
+  }
+
+  formatChapterForContext(node, options = {}) {
+    if (!node) return '';
+
+    const { includeScenes = false, includeCausality = false } = options;
+    const parsed = this.parseChapterSummary(node.summary);
+    const lines = [];
+
+    lines.push(`第${node.order}章${node.title ? `《${node.title}》` : ''}`);
+
+    const summaryParts = [
+      parsed.oneSentence,
+      parsed.summary,
+      parsed.mainConflict ? `核心冲突：${parsed.mainConflict}` : '',
+      parsed.chapterGoal ? `章节目标：${parsed.chapterGoal}` : '',
+      parsed.chapterOutcome ? `章节结果：${parsed.chapterOutcome}` : ''
+    ].filter(Boolean);
+
+    if (summaryParts.length > 0) {
+      lines.push(summaryParts.join('\n'));
+    } else if (typeof node.summary === 'string') {
+      lines.push(node.summary);
+    }
+
+    if (includeCausality) {
+      const chapterGoal = node.chapterGoal || parsed.chapterGoal;
+      const chapterOutcome = node.chapterOutcome || parsed.chapterOutcome;
+      const openQuestions = node.openQuestions || parsed.openQuestions;
+      const resolvedQuestions = node.resolvedQuestions || parsed.resolvedQuestions;
+
+      if (chapterGoal) lines.push(`已记录目标：${chapterGoal}`);
+      if (chapterOutcome) lines.push(`已记录结果：${chapterOutcome}`);
+      if (Array.isArray(openQuestions) && openQuestions.length > 0) {
+        lines.push(`未解决问题：${openQuestions.join('；')}`);
+      }
+      if (Array.isArray(resolvedQuestions) && resolvedQuestions.length > 0) {
+        lines.push(`已解决问题：${resolvedQuestions.join('；')}`);
+      }
+    }
+
+    if (includeScenes && Array.isArray(parsed.scenes) && parsed.scenes.length > 0) {
+      lines.push('场景节拍：');
+      parsed.scenes.forEach((scene, index) => {
+        lines.push(`${index + 1}. ${scene.location || '未知地点'}｜${scene.action || '无动作'}｜冲突：${scene.conflict || '无'}｜结果：${scene.outcome || '无'}`);
+      });
+    }
+
+    return lines.filter(Boolean).join('\n');
+  }
+
+  getPreviousChaptersSummary(allChapters, chapterNumber, count = 5) {
+    return allChapters
+      .filter(node => node.order < chapterNumber)
+      .sort((a, b) => b.order - a.order)
+      .slice(0, count)
+      .reverse()
+      .map(node => this.formatChapterForContext(node, { includeScenes: true, includeCausality: true }))
+      .filter(Boolean)
+      .join('\n\n');
+  }
+
+  getNextChapterSummary(allChapters, chapterNumber) {
+    const nextNode = allChapters.find(node => node.order === chapterNumber + 1);
+    return this.formatChapterForContext(nextNode, { includeScenes: false, includeCausality: true });
+  }
+
+  calculateVolumeProgress(chapterNumber, volume) {
+    if (!volume || typeof volume.startChapter !== 'number' || typeof volume.endChapter !== 'number') {
+      return `第 ${chapterNumber} 章（未匹配分卷范围）`;
+    }
+
+    const total = Math.max(volume.endChapter - volume.startChapter + 1, 1);
+    const current = Math.min(Math.max(chapterNumber - volume.startChapter + 1, 1), total);
+    const percent = Math.round((current / total) * 100);
+    return `第 ${current} / ${total} 章（${percent}%）`;
+  }
+
+  buildAntiRepetitionContext(allChapters, chapterNumber, count = 5) {
+    const recent = allChapters
+      .filter(node => node.order < chapterNumber)
+      .sort((a, b) => b.order - a.order)
+      .slice(0, count)
+      .reverse();
+
+    if (recent.length === 0) return '';
+
+    const beats = recent.map(node => {
+      const parsed = this.parseChapterSummary(node.summary);
+      const parts = [];
+      const goal = node.chapterGoal || parsed.chapterGoal;
+      const outcome = node.chapterOutcome || parsed.chapterOutcome;
+
+      if (goal) parts.push(`目标=${goal}`);
+      if (outcome) parts.push(`结果=${outcome}`);
+      if (parsed.mainConflict) parts.push(`冲突=${parsed.mainConflict}`);
+
+      if (Array.isArray(parsed.scenes) && parsed.scenes.length > 0) {
+        const sceneBeats = parsed.scenes
+          .map(scene => [scene.action, scene.conflict, scene.outcome].filter(Boolean).join(' -> '))
+          .filter(Boolean)
+          .slice(0, 3);
+        if (sceneBeats.length > 0) parts.push(`场景节拍=${sceneBeats.join('；')}`);
+      }
+
+      if (node.content) {
+        const firstParagraph = node.content.split(/\n+/).find(p => p.trim()) || '';
+        if (firstParagraph) parts.push(`开篇方式=${firstParagraph.trim().slice(0, 60)}`);
+      }
+
+      return `第${node.order}章：${parts.join('；')}`;
+    }).filter(line => !line.endsWith('：'));
+
+    if (beats.length === 0) return '';
+
+    return `## 最近章节重复规避\n${beats.join('\n')}\n\n写作约束：本章必须产生新的行动、冲突推进和场景节奏；不得复用上述章节的开篇方式、冲突组合、信息揭示顺序或“目标受阻-争执-临时缓和”的固定结构。若必须承接同一矛盾，应改变地点、角色主动性、信息增量和结尾状态。`;
+  }
+
   async createVolumePlanFlow(projectId, targetCount = 4, volumeConfigs = [], options = {}) {
     const outlineRow = await storageEx.getCoreOutline(projectId);
     const coreOutlineText = outlineRow?.content || '';
@@ -629,7 +756,9 @@ ${characters.map(c => c.name).join(', ')}`;
       let t = coreOutlineText;
       if (t.includes('```')) t = t.replace(/```json\n?|```\n?|```/g, '');
       coreOutlineParsed = JSON.parse(t);
-    } catch { }
+    } catch (err) {
+      console.warn('Failed to parse core outline for volume plan:', err);
+    }
     const result = await this.planner.createVolumePlan(coreOutlineParsed, targetCount, volumeConfigs, projectId, options);
     const arr = Array.isArray(result?.volumes) ? result.volumes : [];
     const target = Math.max(1, Number(targetCount) || 4);
@@ -686,7 +815,9 @@ ${characters.map(c => c.name).join(', ')}`;
       let t = coreOutlineText;
       if (t.includes('```')) t = t.replace(/```json\n?|```\n?|```/g, '');
       coreOutlineParsed = JSON.parse(t);
-    } catch { }
+    } catch (err) {
+      console.warn('Failed to parse core outline for volume regeneration:', err);
+    }
 
     const result = await this.planner.regenerateSingleVolume({
       coreOutline: coreOutlineParsed,

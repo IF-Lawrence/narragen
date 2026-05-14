@@ -352,27 +352,31 @@ export const Book3D = ({
     const extractColorFromImage = async (imageSrc, autoSave = false, extraUpdates = {}) => {
         if (!imageSrc) return;
         extractColorSync(imageSrc, async (color) => {
+            let updates = null;
+
             if (color) {
                 setEditingStyle(prev => ({ ...prev, spineColor: color }));
-                // 如果需要自动保存，同时保存书脊颜色到数据库
-                if (autoSave) {
-                    // 关键修复：必须基于现有的 bookStyle 进行合并，否则会丢失 sizePreset 等其他属性！
-                    const currentBookStyle = project?.bookStyle || {};
-                    const newBookStyle = { ...currentBookStyle, spineColor: color };
+            }
 
-                    // 处理封面：上传到服务器（函数会自动处理 Base64 和 URL）
-                    const updates = { ...extraUpdates, bookStyle: newBookStyle };
-                    if (updates.cover) {
-                        try {
-                            updates.cover = await uploadCoverImage(updates.cover);
-                        } catch (error) {
-                            console.error('Failed to upload cover during color extraction');
-                            delete updates.cover; // 上传失败则不更新封面
-                        }
+            // 自动保存不能依赖取色成功：封面生成已完成时，即使取色失败也要保存封面。
+            if (autoSave) {
+                const currentBookStyle = project?.bookStyle || {};
+                const newBookStyle = color
+                    ? { ...currentBookStyle, spineColor: color }
+                    : currentBookStyle;
+
+                updates = { ...extraUpdates, bookStyle: newBookStyle };
+
+                if (updates.cover) {
+                    try {
+                        updates.cover = await uploadCoverImage(updates.cover);
+                    } catch {
+                        console.error('Failed to upload cover during color extraction');
+                        delete updates.cover;
                     }
-
-                    onEdit?.(updates);
                 }
+
+                onEdit?.(updates);
             }
         });
     };

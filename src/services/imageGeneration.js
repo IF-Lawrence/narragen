@@ -9,6 +9,17 @@ import { openai } from './openai';
 
 const IMAGES_API = '/api/images';
 
+function buildImageGenerationsUrl(baseUrl = 'https://api.tu-zi.com') {
+    const cleanBaseUrl = baseUrl.replace(/\/+$/, '');
+    const versionedBaseUrl = cleanBaseUrl.endsWith('/v1') ? cleanBaseUrl : `${cleanBaseUrl}/v1`;
+    return `${versionedBaseUrl}/images/generations`;
+}
+
+function normalizeImageInputs(image) {
+    if (!image) return undefined;
+    return Array.isArray(image) ? image.filter(Boolean) : [image].filter(Boolean);
+}
+
 /**
  * 上传图像到服务器
  * @param {string} type - 图像类型（characters, covers, prompt_logs）
@@ -100,6 +111,17 @@ Avoid "boring", "quiet", or "vintage" looks unless absolutely necessary. We want
 
 **DO NOT default to Western aesthetics for Chinese novels!** When in doubt about era, check if world setting mentions modern elements.
 
+## 2.5 STORY ALIGNMENT RULE (HIGHEST PRIORITY)
+The cover must be visually loyal to the actual novel, not merely beautiful.
+- Identify the exact genre, era, culture, social setting, protagonist conflict, emotional tone, and core theme from the input.
+- Every subject, costume, environment, color, and symbol must be explainable from the novel context.
+- Do NOT invent unrelated characters, unrelated romantic couples, unrelated fantasy elements, unrelated modern fashion, or western-default aesthetics.
+- If the story is Chinese or East Asian, preserve East Asian cultural and facial-feature cues unless the outline explicitly says otherwise.
+- If the protagonist is described as a student, worker, cultivator, detective, aristocrat, etc., the generated subject must visually communicate that role.
+- The final prompt must include a sentence beginning with "Story fidelity lock:" that lists the must-not-violate visual constraints.
+- The final prompt must include "Cover subject:", "Symbolic motif:", "Setting fidelity:", and "Avoid:" clauses.
+- A standard attractive portrait is only allowed when the novel is explicitly character-portrait driven. Otherwise prefer a narrative scene, symbolic object, fragmented body detail, reflection, silhouette, or environmental metaphor.
+
 ## 3. Impact Boosters (MANDATORY)
 - **Extreme Scale Contrast**: Create drama through size difference.
     - *Option A (The Ant)*: Tiny human vs. Massive Structure (skyscraper, mountain, machine).
@@ -122,7 +144,7 @@ Avoid "boring", "quiet", or "vintage" looks unless absolutely necessary. We want
 {
   "style": "Modern Cinematic / Graphic Surrealism / Neo-Artistic / Classical East Asian / Modern Asian",
   "reason": "Why this creates maximum visual impact",
-  "prompt": "Detailed prompt. MUST include 'scale contrast' or 'dynamic perspective' elements. For East Asian novels, MUST include specific Eastern visual keywords.",
+  "prompt": "Detailed prompt. MUST include Cover subject, Symbolic motif, Setting fidelity, Story fidelity lock, and 'scale contrast' or 'dynamic perspective' elements. For East Asian novels, MUST include specific Eastern visual keywords.",
   "negative": "low resolution, blurry, dull colors, vintage photo, messy background, text, watermark"
 }
 
@@ -142,28 +164,24 @@ Avoid "boring", "quiet", or "vintage" looks unless absolutely necessary. We want
 export async function generateCoverPromptWithLLM(project = {}, outline = {}, options = {}) {
     // 构建小说信息摘要给 LLM
     const novelInfo = [];
+    const brief = buildCoverCreativeBrief(project, outline, options);
+    const subjectStrategy = buildCoverSubjectStrategy(brief);
 
     if (project.name) novelInfo.push(`Title: ${project.name}`);
     if (options.novelType) novelInfo.push(`Genre: ${options.novelType}`);
     if (options.tone) novelInfo.push(`Tone/Mood: ${options.tone}`);
-    if (outline.theme) novelInfo.push(`Theme: ${outline.theme}`);
+    if (getPrimaryTheme(outline)) novelInfo.push(`Theme: ${getPrimaryTheme(outline)}`);
     if (outline.coreConflict) novelInfo.push(`Core Conflict: ${outline.coreConflict}`);
     if (outline.logline) novelInfo.push(`Synopsis: ${outline.logline}`);
 
-    // 兼容新旧 worldSetting 结构
-    const ws = outline.worldSetting || {};
-    const worldDesc = ws.description || [ws.timePeriod, ws.location, ws.socialStructure].filter(Boolean).join('，') || outline.worldNotes || '';
+    const worldDesc = getWorldDescription(outline);
     if (worldDesc) novelInfo.push(`World Setting: ${worldDesc.substring(0, 300)}`);
 
     // 主角信息
-    if (outline.characters && outline.characters.length > 0) {
-        const protagonist = outline.characters.find(c =>
-            c.role === '主角' || c.role === 'Protagonist' || c.role?.includes('主角')
-        ) || outline.characters[0];
-        if (protagonist) {
-            const charInfo = [protagonist.name, protagonist.appearance, protagonist.personality].filter(Boolean).join(', ');
-            novelInfo.push(`Protagonist: ${charInfo.substring(0, 200)}`);
-        }
+    const protagonist = getProtagonist(outline);
+    if (protagonist) {
+        const charInfo = [protagonist.name, protagonist.role, protagonist.appearance, protagonist.personality, protagonist.goal, protagonist.arc].filter(Boolean).join(', ');
+        novelInfo.push(`Protagonist: ${charInfo.substring(0, 280)}`);
     }
 
     if (options.targetAudience) {
@@ -171,18 +189,34 @@ export async function generateCoverPromptWithLLM(project = {}, outline = {}, opt
         novelInfo.push(`Target Audience: ${audience}`);
     }
 
-    const userPrompt = `Analyze this novel and generate a professional book cover design prompt:
+    const userPrompt = `Analyze this novel and generate a professional book cover design prompt from this creative brief:
 
+<RawNovelInfo>
 ${novelInfo.join('\n')}
+</RawNovelInfo>
 
-Choose the most fitting design tradition and create an artistic, sophisticated cover prompt.`;
+<CoverCreativeBrief>
+${formatCoverCreativeBrief(brief)}
+</CoverCreativeBrief>
+
+<SubjectStrategy>
+${subjectStrategy}
+</SubjectStrategy>
+
+Choose the most fitting design tradition and create an artistic, sophisticated cover prompt.
+
+Critical:
+- The generated image must be faithful to the novel's theme, era, culture, social setting, and protagonist conflict.
+- Do not create a generic attractive character, unrelated genre image, random couple, or decorative cover with no narrative function.
+- The output prompt must explicitly contain: Cover subject, Symbolic motif, Setting fidelity, Story fidelity lock, Avoid.
+- Choose one strong cover concept, not a collage of many unrelated elements.`;
 
     try {
         const response = await openai.generateText(userPrompt, COVER_DESIGNER_SYSTEM_PROMPT, {
             feature: 'coverDesign',
             projectId: project?.id,
             temperature: 0.7,
-            max_tokens: 500,
+            max_tokens: 800,
             response_format: { type: 'json_object' }
         });
 
@@ -272,6 +306,177 @@ const TONE_STYLES = {
     '细腻抒情': 'delicate soft lighting, pastel tones, emotional depth'
 };
 
+function getWorldDescription(outline = {}) {
+    const ws = outline.worldSetting || {};
+    return ws.description || [ws.timePeriod, ws.location, ws.socialStructure, ws.technology, ws.supernaturalRules, ws.keyRules]
+        .filter(Boolean)
+        .join('，') || outline.worldNotes || '';
+}
+
+function getPrimaryTheme(outline = {}) {
+    return outline.primaryTheme || outline.theme || (Array.isArray(outline.secondaryThemes) ? outline.secondaryThemes[0] : '') || '';
+}
+
+function getProtagonist(outline = {}) {
+    if (!Array.isArray(outline.characters) || outline.characters.length === 0) return null;
+    return outline.characters.find(c =>
+        c.role === '主角' ||
+        c.role === 'Protagonist' ||
+        c.role?.includes?.('主角') ||
+        c.role?.toLowerCase?.().includes('protagonist')
+    ) || outline.characters[0];
+}
+
+function detectStoryEraAndCulture(outline = {}, options = {}) {
+    const novelType = options.novelType || '';
+    const worldDesc = getWorldDescription(outline);
+    const combined = `${novelType} ${worldDesc} ${outline.logline || ''} ${outline.coreConflict || ''}`;
+
+    const isClassicalEastAsian = /玄幻|仙侠|武侠|修仙|古代|古风|朝代|江湖|宗门|灵气|仙|武林|皇宫|王朝/.test(combined);
+    const isModernEastAsian = /现实|成长|言情|青春|现代|都市|大学|校园|职场|当代|城市|公寓|咖啡|公司/.test(combined);
+    const isSciFi = /科幻|未来|赛博|太空|星际|机器人|AI|科技|义体|废土/.test(combined);
+    const isHistorical = /历史|民国|战争|朝代|宫廷|王朝/.test(combined);
+
+    if (isClassicalEastAsian) {
+        return {
+            label: 'Classical East Asian / Chinese historical-fantasy setting',
+            positive: 'Chinese / East Asian facial features, culturally authentic ancient Chinese clothing, period-accurate hairstyle, traditional materials, Eastern architecture or natural landscape cues',
+            negative: 'modern western streetwear, European medieval armor, blonde hair, blue eyes, Mediterranean city, generic western fantasy castle'
+        };
+    }
+
+    if (isModernEastAsian) {
+        return {
+            label: 'Modern Chinese / contemporary East Asian setting',
+            positive: 'Chinese / East Asian facial features, contemporary Chinese urban realism, modern Asian fashion, realistic local environment cues',
+            negative: 'European model look, western campus stereotype, fantasy costume, ancient robes, blonde hair, blue eyes'
+        };
+    }
+
+    if (isSciFi) {
+        return {
+            label: 'Science fiction setting',
+            positive: 'futuristic visual language grounded in the story world, coherent technology design, cinematic sci-fi atmosphere',
+            negative: 'ancient costume, generic romance portrait, unrelated fantasy magic, medieval setting'
+        };
+    }
+
+    if (isHistorical) {
+        return {
+            label: 'Historical setting',
+            positive: 'period-accurate clothing, historically grounded environment, restrained authentic styling',
+            negative: 'modern clothing, futuristic devices, generic fantasy costume, anachronistic accessories'
+        };
+    }
+
+    return {
+        label: 'Story-specific setting',
+        positive: 'visual design strictly grounded in the provided story world and character profile',
+        negative: 'unrelated genre elements, random fashion, mismatched era, mismatched culture'
+    };
+}
+
+function buildStoryVisualContext(outline = {}, options = {}) {
+    const context = [];
+    const eraCulture = detectStoryEraAndCulture(outline, options);
+    const novelType = options.novelType || '';
+    const worldDesc = getWorldDescription(outline);
+
+    if (outline.title) context.push(`story title: ${outline.title}`);
+    if (novelType) context.push(`genre: ${novelType}`);
+    if (outline.logline) context.push(`story premise: ${outline.logline}`);
+    const primaryTheme = getPrimaryTheme(outline);
+
+    if (primaryTheme) context.push(`core theme: ${primaryTheme}`);
+    if (outline.coreConflict) context.push(`core conflict: ${outline.coreConflict}`);
+    if (worldDesc) context.push(`world setting: ${worldDesc}`);
+    if (outline.tone || options.tone) context.push(`emotional tone: ${outline.tone || options.tone}`);
+    context.push(`setting lock: ${eraCulture.label}`);
+
+    return {
+        text: context.filter(Boolean).join('; '),
+        positive: eraCulture.positive,
+        negative: eraCulture.negative
+    };
+}
+
+function buildCoverCreativeBrief(project = {}, outline = {}, options = {}) {
+    const storyContext = buildStoryVisualContext(outline, options);
+    const protagonist = getProtagonist(outline);
+    const worldDesc = getWorldDescription(outline);
+    const primaryTheme = getPrimaryTheme(outline);
+    const genre = options.novelType || '';
+    const tone = outline.tone || options.tone || '';
+
+    const protagonistParts = [];
+    if (protagonist) {
+        if (protagonist.name) protagonistParts.push(`name=${protagonist.name}`);
+        if (protagonist.role) protagonistParts.push(`role=${protagonist.role}`);
+        if (protagonist.age) protagonistParts.push(`age=${protagonist.age}`);
+        if (protagonist.appearance) protagonistParts.push(`appearance=${protagonist.appearance}`);
+        if (protagonist.personality) protagonistParts.push(`personality=${protagonist.personality}`);
+        if (protagonist.goal) protagonistParts.push(`goal=${protagonist.goal}`);
+        if (protagonist.arc) protagonistParts.push(`arc=${protagonist.arc}`);
+    }
+
+    return {
+        title: outline.title || project.name || '',
+        genre,
+        premise: outline.logline || '',
+        theme: primaryTheme,
+        conflict: outline.coreConflict || '',
+        world: worldDesc,
+        tone,
+        protagonist: protagonistParts.join('; '),
+        fidelity: storyContext.positive,
+        avoid: storyContext.negative,
+        context: storyContext.text
+    };
+}
+
+function formatCoverCreativeBrief(brief) {
+    return [
+        brief.title ? `Title: ${brief.title}` : '',
+        brief.genre ? `Genre: ${brief.genre}` : '',
+        brief.premise ? `Premise: ${brief.premise}` : '',
+        brief.theme ? `Core theme: ${brief.theme}` : '',
+        brief.conflict ? `Core conflict: ${brief.conflict}` : '',
+        brief.world ? `World setting: ${brief.world}` : '',
+        brief.tone ? `Emotional tone: ${brief.tone}` : '',
+        brief.protagonist ? `Protagonist: ${brief.protagonist}` : '',
+        brief.fidelity ? `Required visual fidelity: ${brief.fidelity}` : '',
+        brief.avoid ? `Must avoid: ${brief.avoid}` : ''
+    ].filter(Boolean).join('\n');
+}
+
+function buildCoverSubjectStrategy(brief) {
+    const text = `${brief.genre} ${brief.premise} ${brief.theme} ${brief.conflict} ${brief.world} ${brief.tone}`;
+    const strategies = [];
+
+    strategies.push('Use a book-cover concept, not a character ID photo or glamour portrait.');
+    strategies.push('The subject must communicate the central conflict before beauty or fashion.');
+
+    if (/悬疑|犯罪|真相|秘密|背叛|猎杀|迷雾/.test(text)) {
+        strategies.push('Cover subject: fragmented clue, obscured figure, reflection, shadow, or threshold moment that suggests danger and concealment.');
+    } else if (/言情|情欲|欲望|沉沦|爱情|暧昧|诱惑/.test(text)) {
+        strategies.push('Cover subject: emotionally charged but restrained symbolic scene, such as a hand gesture, fabric detail, mirror reflection, night corridor, or two figures separated by negative space; avoid explicit posing.');
+    } else if (/玄幻|仙侠|修仙|江湖|灵气|宗门/.test(text)) {
+        strategies.push('Cover subject: small protagonist silhouette against immense Eastern fantasy landscape, ritual object, sword, mountain gate, clouds, or celestial scale contrast.');
+    } else if (/科幻|未来|赛博|AI|机器人|太空|废土/.test(text)) {
+        strategies.push('Cover subject: human-scale figure against coherent technology or city-scale system, with a clear speculative concept.');
+    } else if (/现实|成长|校园|职场|都市|阶层|家庭/.test(text)) {
+        strategies.push('Cover subject: concrete contemporary life scene or symbolic object from the setting, with social pressure visible through environment and composition.');
+    } else {
+        strategies.push('Cover subject: one decisive narrative image or symbolic object that represents the protagonist conflict.');
+    }
+
+    strategies.push('Symbolic motif: choose 1-2 motifs directly from the premise, theme, world, or protagonist goal; do not add unrelated genre symbols.');
+    strategies.push(`Setting fidelity: ${brief.fidelity}`);
+    strategies.push(`Avoid: ${brief.avoid}, generic idol portrait, random couple, unrelated costume, mismatched location, decorative elements not grounded in the story`);
+
+    return strategies.join(' ');
+}
+
 /**
  * 从角色数据和大纲构建图像生成提示词
  * @param {Object} character - 角色数据
@@ -280,10 +485,25 @@ const TONE_STYLES = {
  * @returns {{ characterPrompt: string, stylePrompt: string }}
  */
 export function buildCharacterPrompt(character, outline = {}, options = {}) {
+    const storyContext = buildStoryVisualContext(outline, options);
+
     // 构建角色特征提示词
     const characterParts = [];
 
+    characterParts.push('STRICT STORY-CONSISTENT CHARACTER DESIGN');
+    if (storyContext.text) {
+        characterParts.push(`must visually match this novel context: ${storyContext.text}`);
+    }
+    characterParts.push(`setting and culture must match: ${storyContext.positive}`);
+    characterParts.push('do not create a generic attractive person; design must reflect this exact character role, era, genre, social environment, and narrative conflict');
+
     // 基础信息
+    if (character.name) {
+        characterParts.push(`character name: ${character.name}`);
+    }
+    if (character.role) {
+        characterParts.push(`story role: ${character.role}`);
+    }
     if (character.gender) {
         characterParts.push(character.gender === 'Male' || character.gender === '男' ? 'male' : 'female');
     }
@@ -309,6 +529,16 @@ export function buildCharacterPrompt(character, outline = {}, options = {}) {
         if (roleHints[character.role]) {
             characterParts.push(roleHints[character.role]);
         }
+    }
+
+    if (character.bio || character.background) {
+        characterParts.push(`character background: ${(character.bio || character.background).substring(0, 240)}`);
+    }
+    if (character.goal) {
+        characterParts.push(`character goal: ${character.goal}`);
+    }
+    if (character.arc) {
+        characterParts.push(`character arc: ${character.arc}`);
     }
 
     // 性格 -> 表情/神态
@@ -337,9 +567,7 @@ export function buildCharacterPrompt(character, outline = {}, options = {}) {
     }
 
     // 从世界设定获取背景提示
-    // 兼容新旧 worldSetting 结构
-    const ws = outline.worldSetting || {};
-    const worldDesc = ws.description || [ws.timePeriod, ws.location, ws.socialStructure].filter(Boolean).join('，');
+    const worldDesc = getWorldDescription(outline);
     if (worldDesc) {
         // 提取关键词
         if (worldDesc.includes('古代') || worldDesc.includes('修仙') || worldDesc.includes('仙侠')) {
@@ -351,8 +579,13 @@ export function buildCharacterPrompt(character, outline = {}, options = {}) {
         }
     }
 
+    styleParts.push(`must match story context: ${storyContext.text}`);
+    styleParts.push(`cultural and setting lock: ${storyContext.positive}`);
+
     // 添加通用质量提示词
     styleParts.push('high quality, detailed, 8k resolution, professional portrait');
+    styleParts.push(`avoid theme mismatch: ${storyContext.negative}`);
+    styleParts.push('avoid unrelated genre, mismatched era, mismatched culture, random modern fashion, generic idol portrait, western-default face unless explicitly specified');
 
     const stylePrompt = styleParts.join(', ');
 
@@ -368,21 +601,33 @@ export function buildCharacterPrompt(character, outline = {}, options = {}) {
  * @returns {{ coverPrompt: string, stylePrompt: string }}
  */
 export function buildCoverPrompt(project = {}, outline = {}, options = {}) {
+    const brief = buildCoverCreativeBrief(project, outline, options);
+    const storyContext = buildStoryVisualContext(outline, options);
+    const subjectStrategy = buildCoverSubjectStrategy(brief);
+
     // ========== 构建封面主体描述 ==========
     const coverParts = [];
 
-    // 1. 从核心冲突/主题提取视觉意象
-    if (outline.coreConflict) {
-        coverParts.push(`visual metaphor for: ${outline.coreConflict}`);
+    coverParts.push('STRICT STORY-FIDELITY BOOK COVER');
+    if (brief.title) {
+        coverParts.push(`book title/context name: ${brief.title}`);
     }
-    if (outline.theme) {
-        coverParts.push(`thematic imagery: ${outline.theme}`);
+    if (storyContext.text) {
+        coverParts.push(`must visually match this novel context: ${storyContext.text}`);
+    }
+    coverParts.push(`Cover subject strategy: ${subjectStrategy}`);
+    coverParts.push(`Story fidelity lock: ${storyContext.positive}; every visual element must support the stated theme, world setting, protagonist conflict, and emotional tone`);
+
+    // 1. 从核心冲突/主题提取视觉意象
+    if (brief.conflict) {
+        coverParts.push(`visual metaphor for central conflict: ${brief.conflict}`);
+    }
+    if (brief.theme) {
+        coverParts.push(`symbolic motif must express core theme: ${brief.theme}`);
     }
 
     // 2. 从世界设定提取场景背景（完整世界观）
-    // 兼容新旧 worldSetting 结构
-    const ws = outline.worldSetting || {};
-    const worldDesc = ws.description || [ws.timePeriod, ws.location, ws.socialStructure].filter(Boolean).join('，') || outline.worldNotes || '';
+    const worldDesc = brief.world;
     if (worldDesc) {
         // 添加完整世界观描述
         coverParts.push(`world setting and atmosphere: ${worldDesc}`);
@@ -404,25 +649,13 @@ export function buildCoverPrompt(project = {}, outline = {}, options = {}) {
     }
 
     // 3. 从主角提取人物元素
-    if (outline.characters && outline.characters.length > 0) {
-        const protagonist = outline.characters.find(c =>
-            c.role === '主角' || c.role === 'Protagonist' || c.role?.includes('主角')
-        ) || outline.characters[0];
-
-        if (protagonist) {
-            const charDesc = [];
-            if (protagonist.name) charDesc.push(protagonist.name);
-            if (protagonist.appearance) charDesc.push(protagonist.appearance.substring(0, 60));
-            if (protagonist.personality) charDesc.push(`personality: ${protagonist.personality.substring(0, 40)}`);
-            if (charDesc.length > 0) {
-                coverParts.push(`featuring character: ${charDesc.join(', ')}`);
-            }
-        }
+    if (brief.protagonist) {
+        coverParts.push(`protagonist cues, only if visually useful: ${brief.protagonist.substring(0, 260)}`);
     }
 
     // 4. 从故事概要提取核心意象（完整概要）
-    if (outline.logline) {
-        coverParts.push(`story synopsis and essence: ${outline.logline}`);
+    if (brief.premise) {
+        coverParts.push(`story synopsis and essence: ${brief.premise}`);
     }
 
     // 5. 书籍类型 → 封面风格 + 独特构图
@@ -486,6 +719,11 @@ export function buildCoverPrompt(project = {}, outline = {}, options = {}) {
     styleParts.push('cinematic composition, dramatic lighting');
     styleParts.push('high quality, detailed, 8k resolution');
     styleParts.push('artistic masterpiece quality');
+    styleParts.push('single coherent cover concept, strong visual hierarchy, no unrelated collage');
+    styleParts.push('Cover subject must be a narrative moment, symbolic object, silhouette, reflection, or environmental metaphor tied to the story');
+    styleParts.push(`strictly match story context: ${storyContext.text}`);
+    styleParts.push(`avoid theme mismatch: ${storyContext.negative}`);
+    styleParts.push('avoid unrelated genre elements, mismatched era, mismatched culture, generic idol portrait, random romantic couple, western-default aesthetics unless explicitly specified');
 
     // 5. ⚠️ 关键：禁止文字！
     styleParts.push('absolutely NO TEXT, NO TITLE, NO LETTERS, NO WORDS, NO TYPOGRAPHY, NO WRITING');
@@ -560,7 +798,7 @@ export async function getImageApiConfig(projectId = null) {
  * @param {boolean} [params.isCover=false] - 是否为封面生成（如果是，将跳过自动添加拍摄方式前缀）
  * @returns {Promise<{ url?: string, b64_json?: string }>}
  */
-export async function generatePortrait({ characterPrompt, stylePrompt, size = '1:1', apiConfig, projectId, characterName, isCover = false, signal = null }) {
+export async function generatePortrait({ characterPrompt, stylePrompt, size = '1:1', apiConfig, projectId, characterName, isCover = false, image = null, signal = null }) {
     if (!apiConfig || !apiConfig.apiKey) {
         throw new Error('未配置图像生成 API');
     }
@@ -601,9 +839,14 @@ export async function generatePortrait({ characterPrompt, stylePrompt, size = '1
         response_format: 'b64_json' // 使用 base64 格式以便直接保存
     };
 
-    const baseUrl = apiConfig.baseUrl || 'https://api.tu-zi.com/v1';
+    const imageInputs = normalizeImageInputs(image);
+    if (imageInputs?.length) {
+        requestBody.image = imageInputs;
+    }
 
-    const response = await fetch(`${baseUrl}/images/generations`, {
+    const imageGenerationsUrl = buildImageGenerationsUrl(apiConfig.baseUrl || 'https://api.tu-zi.com');
+
+    const response = await fetch(imageGenerationsUrl, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -624,7 +867,7 @@ export async function generatePortrait({ characterPrompt, stylePrompt, size = '1
         throw new Error('没有生成任何图像');
     }
 
-    const image = data.data[0];
+    const generatedImage = data.data[0];
 
     /**
      * Sanitize filename to be safe for filesystem
@@ -651,21 +894,17 @@ export async function generatePortrait({ characterPrompt, stylePrompt, size = '1
     const filename = `${filenameBase}_${timestamp}.png`;
 
     let imageUrl;
-    let base64ForLog; // 用于日志记录
-
-    if (image.b64_json) {
+    if (generatedImage.b64_json) {
         // API 直接返回了 Base64，上传到服务器
-        const fullBase64 = `data:image/png;base64,${image.b64_json}`;
-        base64ForLog = fullBase64;
+        const fullBase64 = `data:image/png;base64,${generatedImage.b64_json}`;
         imageUrl = await uploadImage(imageType, filename, fullBase64);
         console.log('[ImageGen] Uploaded image to server:', imageUrl);
-    } else if (image.url) {
+    } else if (generatedImage.url) {
         // API 返回了 URL，下载并上传到本地服务器
         // 重要：AI 返回的 URL 是临时的，必须下载并上传到本地！
         console.log('[ImageGen] API returned URL, downloading and uploading to local server...');
-        const base64Data = await urlToBase64(image.url);
+        const base64Data = await urlToBase64(generatedImage.url);
         if (base64Data.startsWith('data:')) {
-            base64ForLog = base64Data;
             imageUrl = await uploadImage(imageType, filename, base64Data);
             console.log('[ImageGen] Uploaded image to server:', imageUrl);
         } else {
@@ -802,7 +1041,7 @@ export function getCoverDraft(projectId) {
     try {
         const data = localStorage.getItem(key);
         return data ? JSON.parse(data) : null;
-    } catch (e) {
+    } catch {
         return null;
     }
 }

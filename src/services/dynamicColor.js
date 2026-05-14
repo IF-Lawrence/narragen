@@ -3,13 +3,53 @@
  * 从图片提取源色，用于全局主题和书脊
  */
 import {
-    argbFromHex,
     hexFromArgb,
-    QuantizerCelebi,
-    Score,
     sourceColorFromImage,
     Hct,
 } from '@material/material-color-utilities';
+
+function rgbToHex(r, g, b) {
+    return `#${[r, g, b].map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('')}`.toUpperCase();
+}
+
+function extractCanvasAverageColor(img) {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const w = 64;
+    const h = 64;
+    canvas.width = w;
+    canvas.height = h;
+    ctx.drawImage(img, 0, 0, w, h);
+
+    const { data } = ctx.getImageData(0, 0, w, h);
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    let weightTotal = 0;
+
+    for (let i = 0; i < data.length; i += 4 * 3) {
+        const alpha = data[i + 3] / 255;
+        if (alpha < 0.2) continue;
+
+        const pr = data[i];
+        const pg = data[i + 1];
+        const pb = data[i + 2];
+        const max = Math.max(pr, pg, pb);
+        const min = Math.min(pr, pg, pb);
+        const saturation = max === 0 ? 0 : (max - min) / max;
+        const brightness = max / 255;
+
+        // Prefer visible, moderately saturated pixels; avoid white/black background dominance.
+        const weight = alpha * (0.35 + saturation) * (brightness > 0.18 && brightness < 0.95 ? 1 : 0.35);
+        r += pr * weight;
+        g += pg * weight;
+        b += pb * weight;
+        weightTotal += weight;
+    }
+
+    if (!weightTotal) return null;
+    return rgbToHex(r / weightTotal, g / weightTotal, b / weightTotal);
+}
 
 /**
  * 从图片 URL 或 base64 提取 MD3 源色
@@ -57,11 +97,21 @@ export function extractColorSync(imageSrc, callback) {
 
     const img = new Image();
     img.crossOrigin = 'Anonymous';
-    img.src = imageSrc;
+    let handled = false;
 
     img.onload = async () => {
+        if (handled) return;
+        handled = true;
         try {
-            const sourceColorArgb = await sourceColorFromImage(img);
+            let sourceColorArgb = null;
+            try {
+                sourceColorArgb = await sourceColorFromImage(img);
+            } catch (error) {
+                console.warn('[DynamicColor] MD3 取色失败，尝试 Canvas 兜底:', error);
+                const fallbackColor = extractCanvasAverageColor(img);
+                callback?.(fallbackColor);
+                return;
+            }
 
             // 下面尝试检测图片整体饱和度，修正 MD3 算法在黑白图片上容易提取出高饱和度噪点颜色的问题
             let finalColorArgb = sourceColorArgb;
@@ -122,9 +172,17 @@ export function extractColorSync(imageSrc, callback) {
     };
 
     img.onerror = () => {
+        if (handled) return;
+        handled = true;
         console.warn('[DynamicColor] 图片加载失败');
         callback?.(null);
     };
+
+    img.src = imageSrc;
+
+    if (img.complete && img.naturalWidth > 0) {
+        img.onload();
+    }
 }
 
 /**
