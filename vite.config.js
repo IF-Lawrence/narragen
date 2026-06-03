@@ -265,6 +265,106 @@ export default defineConfig({
               }
             }
           }
+
+          // 首次安装自动加载出厂种子数据（data/seed/）
+          // 触发条件：projects 表为空（全新用户，没有手动创建过任何项目）
+          try {
+            const projectCount = db.prepare('SELECT COUNT(*) AS c FROM projects').get().c;
+            const seedDir = path.join(dataDir, 'seed');
+            if (projectCount === 0 && fs.existsSync(path.join(seedDir, 'projects.json'))) {
+              console.log('[Seed] Empty DB detected, loading factory seed data...');
+
+              const seedTables = [
+                'projects', 'volumes', 'chapter_nodes', 'characters',
+                'constraints', 'core_outlines', 'settings',
+              ];
+
+              // 某些表的字段在 DB 里以 JSON 字符串存储，加载时需 stringify 回去
+              const jsonStringifyFields = {
+                projects: ['bookStyle', 'tags'],
+                volumes: ['keyEvents'],
+                characters: ['currentState', 'relationships', 'stateHistory', 'chapterAppearances'],
+              };
+              const stringifyJson = (table, row) => {
+                const fields = jsonStringifyFields[table];
+                if (!fields) return row;
+                for (const f of fields) {
+                  if (row[f] != null && typeof row[f] !== 'string') {
+                    row[f] = JSON.stringify(row[f]);
+                  }
+                }
+                return row;
+              };
+
+              const insertSeedRows = db.transaction((table, rows) => {
+                if (rows.length === 0) return;
+                if (table === 'settings') {
+                  const stmt = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
+                  for (const r of rows) stmt.run(r.key, r.value);
+                } else {
+                  const cols = Object.keys(rows[0]);
+                  // SQLite 关键字列名（如 order/from/to）需要加引号
+                  const quoteIfReserved = (c) => ['order', 'from', 'to'].includes(c.toLowerCase()) ? `"${c}"` : c;
+                  const colIdents = cols.map(quoteIfReserved).join(',');
+                  const placeholders = cols.map(() => '?').join(',');
+                  const stmt = db.prepare(`INSERT INTO ${table} (${colIdents}) VALUES (${placeholders})`);
+                  for (const r of rows) {
+                    const normalized = stringifyJson(table, { ...r });
+                    stmt.run(...cols.map(c => normalized[c]));
+                  }
+                }
+              });
+
+              for (const t of seedTables) {
+                const f = path.join(seedDir, `${t}.json`);
+                if (!fs.existsSync(f)) continue;
+                const rows = JSON.parse(fs.readFileSync(f, 'utf-8')) || [];
+                try {
+                  insertSeedRows(t, rows);
+                  console.log(`[Seed]   ${t}: ${rows.length} rows`);
+                } catch (innerErr) {
+                  console.error(`[Seed]   ✗ ${t} failed: ${innerErr.message}`);
+                  if (rows.length > 0) {
+                    console.error(`[Seed]     first row keys: ${Object.keys(rows[0]).join(', ')}`);
+                  }
+                  throw innerErr;
+                }
+              }
+
+              // 清空 custom_templates / prompt_templates：出厂时不应有任何"用户自定义模板"
+              // （这是用户的工作数据，但全新安装应该从空白开始）
+              for (const t of ['custom_templates', 'prompt_templates']) {
+                const before = db.prepare(`SELECT COUNT(*) AS c FROM ${t}`).get().c;
+                if (before > 0) {
+                  db.exec(`DELETE FROM ${t}`);
+                  console.log(`[Seed]   ${t}: cleared ${before} rows (factory reset)`);
+                }
+              }
+
+              // 拷贝种子图片到运行时图片目录（仅当目标不存在，避免覆盖用户后续修改）
+              const imgSrc = path.join(seedDir, 'images');
+              const imgDst = path.join(dataDir, 'images');
+              if (fs.existsSync(imgSrc)) {
+                for (const sub of ['covers', 'characters']) {
+                  const src = path.join(imgSrc, sub);
+                  const dst = path.join(imgDst, sub);
+                  if (!fs.existsSync(src)) continue;
+                  fs.mkdirSync(dst, { recursive: true });
+                  for (const file of fs.readdirSync(src)) {
+                    const s = path.join(src, file);
+                    const d = path.join(dst, file);
+                    if (!fs.existsSync(d)) fs.copyFileSync(s, d);
+                  }
+                }
+                console.log('[Seed]   images copied');
+              }
+
+              console.log('[Seed] Factory seed loaded successfully.');
+            }
+          } catch (seedErr) {
+            console.error('[Seed] Failed to load factory seed:', seedErr);
+          }
+
           return db;
         };
 
