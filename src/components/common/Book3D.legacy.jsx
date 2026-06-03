@@ -166,6 +166,9 @@ export const Book3D = ({
     const [isFullyOpen, setIsFullyOpen] = useState(false); // 追踪旋转动画是否完成
 
     const isSavingRef = useRef(false);
+    // 样式编辑器初始化标记：打开时为 true，editingStyle 第一次被同步为 bookStyle 后置为 false，
+    // 用于跳过"打开编辑器"那一次同步带来的伪修改，避免立刻触发自动保存
+    const isStyleInitRef = useRef(false);
 
     // AI 封面生成状态
     const [showCoverGenModal, setShowCoverGenModal] = useState(false);
@@ -191,6 +194,27 @@ export const Book3D = ({
 
         setEditingStyle(bookStyle || {});
     }, [bookStyle, showStyleEditor]);
+
+    // 样式字段自动保存（debounce 600ms）：开本尺寸 / 书脊颜色 / 书脊厚度 / 是否显示书名
+    // 排除 coverImage：封面的上传/移除由"应用封面"按钮单独处理（涉及图片上传异步操作）
+    React.useEffect(() => {
+        if (!showStyleEditor || !editingStyle) return;
+
+        // 跳过"打开编辑器时把 editingStyle 设为 bookStyle"那一次同步
+        if (isStyleInitRef.current) {
+            isStyleInitRef.current = false;
+            return;
+        }
+
+        const { coverImage, ...styleOnly } = editingStyle;
+
+        const timer = setTimeout(() => {
+            // silent: true 让 handleSaveProject 静默保存，不弹"保存成功"提示
+            onEdit?.({ bookStyle: styleOnly, silent: true });
+        }, 600);
+
+        return () => clearTimeout(timer);
+    }, [editingStyle, showStyleEditor, onEdit]);
 
     // 3D 视差效果：鼠标移动时倾斜封面（仅在完全打开后生效）
     const handleMouseMove = (e) => {
@@ -287,10 +311,11 @@ export const Book3D = ({
     const handleStyleClick = (e) => {
         e.stopPropagation();
         if (showStyleEditor) {
-            // 已打开，执行保存并关闭
-            handleStyleSave();
+            // 已打开：纯关闭（样式字段已通过 debounce 自动保存，无需手动触发）
+            setShowStyleEditor(false);
         } else {
-            // 未打开，打开编辑器
+            // 未打开：打开编辑器，并标记为初始化（让首次 editingStyle 同步不触发自动保存）
+            isStyleInitRef.current = true;
             setShowStyleEditor(true);
             setEditingStyle(bookStyle || {});
         }
@@ -370,9 +395,16 @@ export const Book3D = ({
                 if (updates.cover) {
                     try {
                         updates.cover = await uploadCoverImage(updates.cover);
-                    } catch {
-                        console.error('Failed to upload cover during color extraction');
-                        delete updates.cover;
+                    } catch (uploadErr) {
+                        // 上传失败：保留上游 URL（避免静默丢封面），
+                        // 但发个通知告诉用户，让其知情。
+                        console.error('Failed to upload cover to local server, keeping upstream URL:', uploadErr);
+                        window.dispatchEvent(new CustomEvent('narragen-notice', {
+                            detail: {
+                                severity: 'warning',
+                                message: '封面已应用，但未上传到本地服务器（封面 URL 由图像服务商托管）'
+                            }
+                        }));
                     }
                 }
 
@@ -490,9 +522,15 @@ export const Book3D = ({
 
                     clearCoverDraft(evtProjectId);
                     setShowCoverGenModal(false);
+                    window.dispatchEvent(new CustomEvent('narragen-notice', {
+                        detail: { severity: 'success', message: '封面已自动应用' }
+                    }));
                 } else if (status === 'error') {
                     setCoverGenerating(false);
                     setCoverGenError(error);
+                    window.dispatchEvent(new CustomEvent('narragen-notice', {
+                        detail: { severity: 'error', message: `封面生成失败：${error || '未知错误'}` }
+                    }));
                 } else if (status === 'cancelled') {
                     setCoverGenerating(false);
                     setCoverGenError('');

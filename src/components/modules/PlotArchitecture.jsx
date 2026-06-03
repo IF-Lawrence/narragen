@@ -276,12 +276,12 @@ export const PlotArchitecture = ({ isVisible = true }) => {
   const [genChaptersVisible, setGenChaptersVisible] = useState(false);
   const [genChaptersVolumeIds, setGenChaptersVolumeIds] = useState(new Set());
   const [activePreviewVid, setActivePreviewVid] = useState(null);
-  const [totalChaptersInVolume, setTotalChaptersInVolume] = useState(20);
+  const [totalChaptersInVolume, setTotalChaptersInVolume] = useState(5);
   const [batchVolumeConfigs, setBatchVolumeConfigs] = useState({}); // { [vid]: { totalChapters } }
 
   // Single Volume Generation
   const [singleVolumeGenVisible, setSingleVolumeGenVisible] = useState(false);
-  const [singleVolumeGenConfig, setSingleVolumeGenConfig] = useState({ totalChapters: 20, fluctuationProfile: 'rising' });
+  const [singleVolumeGenConfig, setSingleVolumeGenConfig] = useState({ totalChapters: 5, fluctuationProfile: 'rising' });
 
   // Template Generation
   const [genTemplateVisible, setGenTemplateVisible] = useState(false);
@@ -1415,7 +1415,7 @@ export const PlotArchitecture = ({ isVisible = true }) => {
             for (let i = 1; i < v.order; i++) {
               const vol = volumes.find(vol => vol.order === i);
               if (vol) {
-                startChapter += configs[vol.id]?.totalChapters || 20;
+                startChapter += configs[vol.id]?.totalChapters || 5;
               }
             }
           }
@@ -5368,7 +5368,7 @@ export const PlotArchitecture = ({ isVisible = true }) => {
               if (selectedVolumeId) ids.add(selectedVolumeId);
               else volumes.forEach(v => ids.add(v.id));
 
-              const defaultChapters = totalChaptersInVolume || 20;
+              const defaultChapters = totalChaptersInVolume || 5;
               volumes.forEach(v => {
                 configs[v.id] = { totalChapters: defaultChapters };
               });
@@ -5377,7 +5377,7 @@ export const PlotArchitecture = ({ isVisible = true }) => {
               setBatchVolumeConfigs(configs);
               setActivePreviewVid(selectedVolumeId || (volumes[0]?.id));
               setGenChaptersVisible(true);
-              if (!totalChaptersInVolume) setTotalChaptersInVolume(20);
+              if (!totalChaptersInVolume) setTotalChaptersInVolume(5);
             }}
             startIcon={<IconAI />}
             sx={{ borderRadius: 2 }}
@@ -6281,19 +6281,22 @@ export const PlotArchitecture = ({ isVisible = true }) => {
               }
               return null;
             })()}
-            <TextField
-              type="number"
-              label="计划总章数"
-              value={singleVolumeGenConfig.totalChapters}
-              onChange={(e) => {
-                const val = Number(e.target.value);
-                setSingleVolumeGenConfig(prev => ({ ...prev, totalChapters: val }));
-                if (selectedVolumeId) {
-                  applyFluctuationProfile(selectedVolumeId, singleVolumeGenConfig.fluctuationProfile, val);
-                }
-              }}
-              fullWidth
-            />
+            <Tooltip title="开发人员摆烂，章节数量上限为 5 章">
+              <TextField
+                type="number"
+                label="计划总章数"
+                value={singleVolumeGenConfig.totalChapters}
+                onChange={(e) => {
+                  const val = Number(e.target.value);
+                  setSingleVolumeGenConfig(prev => ({ ...prev, totalChapters: val }));
+                  if (selectedVolumeId) {
+                    applyFluctuationProfile(selectedVolumeId, singleVolumeGenConfig.fluctuationProfile, val);
+                  }
+                }}
+                inputProps={{ min: 1, max: 5 }}
+                fullWidth
+              />
+            </Tooltip>
 
             <Stack direction="row" spacing={2} alignItems="center">
               <TextField
@@ -6448,6 +6451,11 @@ export const PlotArchitecture = ({ isVisible = true }) => {
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1.5, fontWeight: 'bold' }}>
           <IconAI color="primary" />
           批量配置章节细纲任务
+          <Tooltip title="开发人员摆烂，章节数量上限为 5 章">
+            <Alert severity="info" icon={<IconInfo />} sx={{ py: 0, px: 1, minWidth: 'auto', '& .MuiAlert-icon': { py: 0, px: 0.5 } }}>
+              每卷上限5章
+            </Alert>
+          </Tooltip>
         </DialogTitle>
         <DialogContent>
 
@@ -6466,7 +6474,7 @@ export const PlotArchitecture = ({ isVisible = true }) => {
               {volumes.map(v => {
                 const isSelected = genChaptersVolumeIds.has(v.id);
                 const volConfig = batchVolumeConfigs[v.id] || {};
-                const totalChapters = volConfig.totalChapters || 20;
+                const totalChapters = volConfig.totalChapters || 5;
 
                 // Calculate local preview data
                 let startChapter = v.startChapter;
@@ -6490,7 +6498,7 @@ export const PlotArchitecture = ({ isVisible = true }) => {
                           const vol = volumes.find(vol => vol.order === i);
                           if (vol) {
                             const cfg = batchVolumeConfigs[vol.id];
-                            const chaptersToAdd = cfg?.totalChapters || 20;
+                            const chaptersToAdd = cfg?.totalChapters || 5;
                             console.log(`Volume ${v.order}: Adding ${chaptersToAdd} chapters from volume ${i}, startChapter now: ${startChapter + chaptersToAdd}`);
                             startChapter += chaptersToAdd;
                           }
@@ -6557,7 +6565,7 @@ export const PlotArchitecture = ({ isVisible = true }) => {
                             if (e.target.checked && !batchVolumeConfigs[v.id]) {
                               setBatchVolumeConfigs(prev => ({
                                 ...prev,
-                                [v.id]: { totalChapters: totalChaptersInVolume || 20, fluctuationProfile: 'rising' }
+                                [v.id]: { totalChapters: totalChaptersInVolume || 5, fluctuationProfile: 'rising' }
                               }));
                             }
                           }}
@@ -6578,6 +6586,7 @@ export const PlotArchitecture = ({ isVisible = true }) => {
                         <>
                           <Divider sx={{ borderStyle: 'dashed', my: 1 }} />
                           <Stack direction="row" spacing={3} alignItems="center" flexWrap="wrap">
+                            <Tooltip title="开发人员摆烂，章节数量上限为 5 章">
                             <TextField
                               size="small"
                               type="number"
@@ -6593,13 +6602,15 @@ export const PlotArchitecture = ({ isVisible = true }) => {
                                 volumes.forEach(vol => {
                                   if (vol.order >= currentVolOrder && genChaptersVolumeIds.has(vol.id)) {
                                     const volProfile = updatedConfigs[vol.id]?.fluctuationProfile || 'rising';
-                                    const volChapters = vol.id === v.id ? val : (updatedConfigs[vol.id]?.totalChapters || 20);
+                                    const volChapters = vol.id === v.id ? val : (updatedConfigs[vol.id]?.totalChapters || 5);
                                     applyFluctuationProfile(vol.id, volProfile, volChapters, updatedConfigs);
                                   }
                                 });
                               }}
+                              inputProps={{ min: 1, max: 5 }}
                               sx={{ width: 140 }}
                             />
+                            </Tooltip>
                             <TextField
                               select
                               size="small"

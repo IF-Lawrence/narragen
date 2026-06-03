@@ -22,7 +22,7 @@ export const ProjectDashboard = ({ onStartReading }) => {
     const [selectedProjectId, setSelectedProjectId] = useState(null);
     const [allStats, setAllStats] = useState({});
     const [allOutlines, setAllOutlines] = useState({});
-    const [notice, setNotice] = useState('');
+    const [notice, setNotice] = useState(null);
     const [isCreating, setIsCreating] = useState(false);
     const [isExporting, setIsExporting] = useState(false);
 
@@ -46,6 +46,15 @@ export const ProjectDashboard = ({ onStartReading }) => {
         };
         if (projects.length > 0) loadAllData();
     }, [projects]);
+
+    useEffect(() => {
+        const handleNotice = (e) => {
+            const { message, severity } = e.detail || {};
+            if (message) setNotice({ message, severity });
+        };
+        window.addEventListener('narragen-notice', handleNotice);
+        return () => window.removeEventListener('narragen-notice', handleNotice);
+    }, []);
 
     const getProjectStats = async (projectId) => {
         try {
@@ -87,12 +96,12 @@ export const ProjectDashboard = ({ onStartReading }) => {
 
             setShowCreateModal(false);
             setNewProjectName('');
-            setNotice('项目创建成功');
+            setNotice({ message: '项目创建成功', severity: 'success' });
 
             // 展示新书的封面（不进入项目）
             setSelectedProjectId(newProject.id);
         } catch (error) {
-            setNotice('创建项目失败: ' + error.message);
+            setNotice({ message: '创建项目失败: ' + error.message, severity: 'error' });
         } finally {
             setIsCreating(false);
         }
@@ -102,26 +111,32 @@ export const ProjectDashboard = ({ onStartReading }) => {
         try {
             await deleteProject(projectId);
             setSelectedProjectId(null);
-            setNotice('项目已删除');
+            setNotice({ message: '项目已删除', severity: 'success' });
         } catch (error) {
-            setNotice('删除项目失败: ' + error.message);
+            setNotice({ message: '删除项目失败: ' + error.message, severity: 'error' });
         }
     };
 
     const handleSaveProject = async (projectId, updates) => {
+        // 解构掉 silent：它只是 UI 提示控制标志，不要进 PUT body（避免污染 SQL 字段）
+        const { silent, ...payload } = updates;
         try {
-            await storage.updateProject(projectId, updates);
+            await storage.updateProject(projectId, payload);
             await refreshProjects();
-            setNotice('保存成功');
+            if (!silent) {
+                setNotice({ message: '保存成功', severity: 'success' });
+            }
         } catch (error) {
-            setNotice('保存失败: ' + error.message);
+            if (!silent) {
+                setNotice({ message: '保存失败: ' + error.message, severity: 'error' });
+            }
         }
     };
 
     const handleSync = async (project) => {
         try {
             const outlineRow = await storageEx.getCoreOutline(project.id);
-            if (!outlineRow?.content) { setNotice('未找到核心大纲'); return; }
+            if (!outlineRow?.content) { setNotice({ message: '未找到核心大纲', severity: 'warning' }); return; }
             let outline = null;
             try {
                 let text = outlineRow.content;
@@ -135,9 +150,9 @@ export const ProjectDashboard = ({ onStartReading }) => {
                 }
                 await storage.updateProject(project.id, updates);
                 await refreshProjects();
-                setNotice('已从大纲同步信息');
-            } else { setNotice('大纲中未找到标题'); }
-        } catch { setNotice('同步失败'); }
+                setNotice({ message: '已从大纲同步信息', severity: 'success' });
+            } else { setNotice({ message: '大纲中未找到标题', severity: 'warning' }); }
+        } catch { setNotice({ message: '同步失败', severity: 'error' }); }
     };
 
     const handleExport = async (project) => {
@@ -191,8 +206,8 @@ export const ProjectDashboard = ({ onStartReading }) => {
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a'); a.href = url; a.download = `${project.name}.txt`;
             document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
-            setNotice('导出成功');
-        } catch { setNotice('导出失败'); }
+            setNotice({ message: '导出成功', severity: 'success' });
+        } catch { setNotice({ message: '导出失败', severity: 'error' }); }
         finally { setIsExporting(false); }
     };
 
@@ -235,8 +250,8 @@ export const ProjectDashboard = ({ onStartReading }) => {
             justifyContent: 'center',
             bgcolor: 'background.default', // Ensure background
         }}>
-            <Snackbar open={!!notice} autoHideDuration={3000} onClose={() => setNotice('')} anchorOrigin={{ vertical: 'top', horizontal: 'center' }}>
-                <Alert onClose={() => setNotice('')} severity={notice.includes('失败') ? 'error' : 'success'}>{notice}</Alert>
+            <Snackbar open={!!notice} autoHideDuration={3000} onClose={() => setNotice(null)} anchorOrigin={{ vertical: 'top', horizontal: 'center' }}>
+                <Alert onClose={() => setNotice(null)} severity={notice?.severity || 'success'}>{notice?.message}</Alert>
             </Snackbar>
 
             {/* Header: Centered Top */}
@@ -252,14 +267,14 @@ export const ProjectDashboard = ({ onStartReading }) => {
                 pt: isMobile ? 4 : 8,
             }}>
                 <Box sx={{ textAlign: 'center' }}>
-                    <Typography variant={isMobile ? "h3" : "h1"} fontWeight="bold" sx={{
-                        color: 'text.primary',
-                        letterSpacing: '-0.05em',
-                        fontSize: isMobile ? '4rem' : '8rem',
-                        lineHeight: 0.9,
-                    }}>
-                        narragen
-                    </Typography>
+                    <Box component="img"
+                        src="/narragen-text-logo.svg"
+                        alt="narragen"
+                        sx={{
+                            height: isMobile ? '3.75rem' : '7.5rem',
+                            width: 'auto',
+                        }}
+                    />
                 </Box>
 
 
